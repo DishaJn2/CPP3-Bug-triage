@@ -1,0 +1,163 @@
+import httpx
+from .base_connector import BaseConnector
+from ..models.ticket import TicketData, ChangeEvent
+
+JIRA_STATUS_MAP = {
+    "open": "Open",
+    "reopened": "Open",
+    "in progress": "In Progress",
+    "resolved": "Resolved",
+    "closed": "Closed",
+    "done": "Closed",
+}
+
+JIRA_PRIORITY_MAP = {
+    "blocker": "P0",
+    "critical": "P0",
+    "p0": "P0",
+    "high": "P1",
+    "p1": "P1",
+    "medium": "P2",
+    "p2": "P2",
+    "normal": "P2",
+    "low": "P3",
+    "p3": "P3",
+    "trivial": "P3",
+    "minor": "P3",
+}
+
+
+class JiraConnector(BaseConnector):
+    def _headers(self) -> dict:
+        h = {"Accept": "application/json"}
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
+        return h
+
+    def _normalise(self, raw: dict) -> TicketData:
+        fields = raw.get("fields") or {}
+
+        priority_name = ((fields.get("priority") or {}).get("name") or "").lower()
+        severity = JIRA_PRIORITY_MAP.get(priority_name, "Unknown")
+
+        raw_status = ((fields.get("status") or {}).get("name") or "").lower()
+        status = JIRA_STATUS_MAP.get(raw_status, raw_status.title() if raw_status else "Unknown")
+
+        components = fields.get("components") or []
+        component = components[0].get("name", "") if components else ""
+
+        assignee = ((fields.get("assignee") or {}).get("displayName") or "")
+        reporter = ((fields.get("reporter") or {}).get("displayName") or "")
+
+        raw_comments = ((fields.get("comment") or {}).get("comments") or [])
+        comments = [
+            {
+                "author": (c.get("author") or {}).get("displayName", ""),
+                "body": (c.get("body") or "")[:500],
+                "created": c.get("created", ""),
+            }
+            for c in raw_comments[-5:]
+        ]
+
+        raw_links = fields.get("issuelinks") or []
+        linked_items = []
+        for lnk in raw_links:
+            inward = lnk.get("inwardIssue") or {}
+            outward = lnk.get("outwardIssue") or {}
+            target = inward or outward
+            if target.get("key"):
+                linked_items.append({
+                    "id": target["key"],
+                    "type": (lnk.get("type") or {}).get("name", "relates"),
+                    "title": (target.get("fields") or {}).get("summary", ""),
+                })
+
+        description = fields.get("description") or ""
+        if isinstance(description, dict):
+            description = str(description)
+
+        return TicketData(
+            ticket_id=raw.get("key", ""),
+            title=(fields.get("summary") or ""),
+            description=str(description)[:2000],
+            severity=severity,
+            status=status,
+            component=component,
+            assignee=assignee,
+            reporter=reporter,
+            created_at=(fields.get("created") or ""),
+            updated_at=(fields.get("updated") or ""),
+            source_id=self.source_id,
+            system_type=self.system_type,
+            url=f"{self.base_url}/browse/{raw.get('key', '')}",
+            comments=comments,
+            linked_items=linked_items,
+        )
+
+    async def get(self, ticket_id: str) -> TicketData | None:
+        fields = "summary,description,status,priority,components,assignee,reporter,created,updated,comment,issuelinks"
+        url = f"{self.base_url}/rest/api/2/issue/{ticket_id}"
+        params = {"fields": fields, "expand": "changelog"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, headers=self._headers(), params=params)
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return self._normalise(resp.json())
+        except Exception:
+            return None
+
+    async def search(self, query: str, max_results: int = 50, start_at: int = 0) -> list[TicketData]:
+        if query:
+            jql = f'project = {self.project_key} AND text ~ "{query}" ORDER BY updated DESC'
+        else:
+            jql = f"project = {self.project_key} AND status in (Open, Reopened, 'In Progress') ORDER BY updated DESC"
+
+        payload = {"jql": jql, "maxResults": max_results, "startAt": start_at,
+                   "fields": ["summary", "description", "status", "priority", "components",
+                              "assignee", "reporter", "created", "updated", "comment", "issuelinks"]}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self.base_url}/rest/api/2/search",
+                    json=payload, headers=self._headers()
+                )
+                if resp.status_code != 200:
+                    return []
+                data = resp.json()
+                return [self._normalise(issue) for issue in data.get("issues", [])]
+        except Exception:
+            return []
+
+    async def get_linked_items(self, ticket_id: str) -> list[dict]:
+        ticket = await self.get(ticket_id)
+        if ticket:
+            return ticket.linked_items
+        return []
+
+    async def get_changelog(self, ticket_id: str, since: str = "") -> list[ChangeEvent]:
+        url = f"{self.base_url}/rest/api/2/issue/{ticket_id}/changelog"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, headers=self._headers())
+                resp.raise_for_status()
+                data = resp.json()
+                values = data.get("values") or data.get("histories") or []
+                changes = []
+                for entry in values:
+                    created = entry.get("created", "")
+                    if since and created <= since:
+                        continue
+                    author = (entry.get("author") or {}).get("displayName", "")
+                    for item in entry.get("items") or []:
+                        changes.append(ChangeEvent(
+                            field=item.get("field", ""),
+                            old_value=item.get("fromString") or "",
+                            new_value=item.get("toString") or "",
+                            changed_at=created,
+                            changed_by=author,
+                        ))
+                return changes
+        except Exception:
+            return []
