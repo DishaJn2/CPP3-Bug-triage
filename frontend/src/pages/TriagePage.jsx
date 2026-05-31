@@ -213,7 +213,16 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
           <div className="panel-hdr">
             <div className="panel-num pn-blue">02</div>
             <span className="panel-title">Related Issues</span>
-            <span className="panel-badge pb-blue">{related.related_tickets?.length || 0} found</span>
+            {(() => {
+              const tickets = related.related_tickets || []
+              const count   = tickets.length
+              if (!count) return <span className="panel-badge pb-blue">0 found</span>
+              const allWeak = tickets.every((t) => (t.similarity_score || 0) < 0.35)
+              const badgeLabel = allWeak
+                ? `${count} weak match${count !== 1 ? 'es' : ''}`
+                : `${count} found`
+              return <span className="panel-badge pb-blue">{badgeLabel}</span>
+            })()}
           </div>
           <div className="panel-body scroll">
             {!related.related_tickets?.length ? (
@@ -221,8 +230,17 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             ) : related.related_tickets.map((t, i) => {
               const score = t.similarity_score || 0
               const pct   = (score * 100).toFixed(0)
-              const simCls = score >= 0.8 ? 'h' : score >= 0.6 ? 'm' : 'l'
-              const fillCls = score >= 0.8 ? 'sim-h' : score >= 0.6 ? 'sim-m' : 'sim-l'
+              const label = t.similarity_label || ''
+
+              const isWeak = score < 0.35 || label === 'Possible Match'
+              const isGood = !isWeak && (label === 'Good Match' || label === 'Excellent Match')
+              // isFair = !isWeak && !isGood
+
+              const barColor    = isWeak ? 'var(--text3)' : isGood ? 'var(--teal)' : 'var(--orange)'
+              const reasonText  = isWeak
+                ? 'Weak semantic overlap — included for completeness'
+                : t.similarity_reason
+
               return (
                 <div key={i} className="issue-card">
                   <div className="issue-top">
@@ -234,11 +252,20 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                   </div>
                   <div className="sim-row">
                     <div className="sim-bar">
-                      <div className={`sim-fill ${fillCls}`} style={{ width: `${pct}%` }} />
+                      <div className="sim-fill" style={{ width: `${pct}%`, background: barColor }} />
                     </div>
-                    <span className={`sim-pct ${simCls}`}>{pct}% {t.similarity_label || ''}</span>
+                    <span className="sim-pct" style={{ color: barColor }}>{pct}% {label}</span>
                   </div>
-                  {t.similarity_reason && <p className="sim-reason">{t.similarity_reason}</p>}
+                  {reasonText && (
+                    <p className="sim-reason" style={{ color: isWeak ? 'var(--text3)' : undefined }}>
+                      {reasonText}
+                    </p>
+                  )}
+                  {isWeak && (
+                    <p style={{ fontSize: 11, color: 'var(--text3)', fontStyle: 'italic', margin: '2px 0 0 0' }}>
+                      Low confidence match
+                    </p>
+                  )}
                 </div>
               )
             })}

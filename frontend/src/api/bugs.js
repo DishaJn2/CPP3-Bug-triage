@@ -1,7 +1,10 @@
 import client from './client'
 
 export const getBugs = (params = {}) =>
-  client.get('/bugs', { params, timeout: 20000 }).then((r) => r.data)
+  client.get('/bugs', { params, timeout: 15000 }).then((r) => r.data)
+
+export const refreshBugCache = () =>
+  client.post('/bugs/refresh').then((r) => r.data)
 
 export const getBugStatus = (bugId) =>
   client.get(`/bugs/${bugId}/status`).then((r) => r.data)

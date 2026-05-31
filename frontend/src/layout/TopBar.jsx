@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { getConnections } from '../api/settings'
+import { getMetrics } from '../api/bugs'
 
 const NAV = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -23,8 +23,8 @@ export default function TopBar() {
   const [connCount, setConnCount] = useState(0)
 
   useEffect(() => {
-    getConnections()
-      .then((list) => setConnCount(Array.isArray(list) ? list.filter((c) => c.enabled !== false).length : 0))
+    getMetrics()
+      .then((data) => setConnCount(data?.sources_online ?? 0))
       .catch(() => setConnCount(0))
   }, [])
 

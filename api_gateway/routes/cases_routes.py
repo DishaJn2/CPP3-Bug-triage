@@ -15,6 +15,60 @@ router = APIRouter(tags=["cases"])
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "Unknown": 4}
 
 
+async def background_full_fetch(connector_list: list) -> None:
+    """Fetch more pages per connector and warm Redis after the fast response is sent."""
+    for connector in connector_list:
+        try:
+            existing = await get_cached_buglist(connector.source_id, "open", "")
+            if existing and len(existing) > 50:
+                continue  # already well-populated
+
+            all_tickets = []
+            if connector.system_type == "github":
+                for pg in range(1, 6):
+                    batch = await asyncio.wait_for(
+                        connector.search("", max_results=100, page=pg),
+                        timeout=12.0,
+                    )
+                    if not batch:
+                        break
+                    all_tickets.extend(batch)
+                    if len(batch) < 100:
+                        break
+                    await asyncio.sleep(0.5)
+            elif connector.system_type == "jira_apache":
+                for start_at in range(0, 300, 50):
+                    batch = await asyncio.wait_for(
+                        connector.search("", max_results=50, start_at=start_at),
+                        timeout=12.0,
+                    )
+                    if not batch:
+                        break
+                    all_tickets.extend(batch)
+                    if len(batch) < 50:
+                        break
+                    await asyncio.sleep(0.5)
+            elif connector.system_type == "bugzilla":
+                for offset in range(0, 2000, 500):
+                    batch = await asyncio.wait_for(
+                        connector.search("", max_results=500, offset=offset),
+                        timeout=15.0,
+                    )
+                    if not batch:
+                        break
+                    all_tickets.extend(batch)
+                    if len(batch) < 500:
+                        break
+                    await asyncio.sleep(0.5)
+
+            if all_tickets:
+                data = [dataclasses.asdict(t) for t in all_tickets]
+                await cache_buglist(connector.source_id, "open", "", data, ttl=300)
+                print(f"[BackgroundFetch] {connector.source_id}: {len(data)} bugs cached", flush=True)
+        except Exception as e:
+            print(f"[BackgroundFetch] {connector.source_id} failed: {type(e).__name__}: {str(e)[:80]}", flush=True)
+
+
 @router.get("/debug/sources")
 async def debug_sources():
     from orchestrator.db.session import AsyncSessionLocal
@@ -56,62 +110,90 @@ async def get_bugs(
 ):
     connectors = await ConnectorRegistry.get_all_enabled()
 
-    async def fetch_all_for_connector(connector):
-        cached = await get_cached_buglist(connector.source_id, "open", "")
-        if cached is not None:
-            return connector.source_id, cached, True
+    if not connectors:
+        return {
+            "bugs": [], "total": 0, "page": page,
+            "page_size": page_size, "sources_online": 0,
+            "sources_total": 0, "partial": False,
+            "message": "No connectors configured",
+        }
 
-        all_tickets = []
+    async def fetch_one(connector):
+        try:
+            cached = await get_cached_buglist(connector.source_id, "open", "")
+            if cached is not None:
+                return connector.source_id, cached, True
 
-        if connector.system_type == "github":
-            for pg in range(1, 11):
-                batch = await connector.search("", max_results=100, page=pg)
-                if not batch:
-                    break
-                all_tickets.extend(batch)
-                if len(batch) < 100:
-                    break
+            tickets = []
+            if connector.system_type == "github":
+                for pg in range(1, 3):  # 2 pages × 100 = 200 bugs on cold cache
+                    batch = await asyncio.wait_for(
+                        connector.search("", max_results=100, page=pg),
+                        timeout=15.0,
+                    )
+                    if not batch:
+                        break
+                    tickets.extend(batch)
+                    if len(batch) < 100:
+                        break
+            elif connector.system_type == "jira_apache":
+                for start_at in range(0, 100, 50):  # 2 pages × 50 = 100 bugs on cold cache
+                    batch = await asyncio.wait_for(
+                        connector.search("", max_results=50, start_at=start_at),
+                        timeout=15.0,
+                    )
+                    if not batch:
+                        break
+                    tickets.extend(batch)
+                    if len(batch) < 50:
+                        break
+            elif connector.system_type == "bugzilla":
+                # Single fetch of 500 on cold cache; background task fills the rest
+                tickets = list(await asyncio.wait_for(
+                    connector.search("", max_results=500, offset=0),
+                    timeout=20.0,
+                ) or [])
+            else:
+                tickets = list(await asyncio.wait_for(
+                    connector.search("", max_results=100),
+                    timeout=15.0,
+                ) or [])
 
-        elif connector.system_type == "jira_apache":
-            for start in range(0, 1000, 50):
-                batch = await connector.search("", max_results=50, start_at=start)
-                if not batch:
-                    break
-                all_tickets.extend(batch)
-                if len(batch) < 50:
-                    break
+            data = [dataclasses.asdict(t) for t in tickets]
+            ttl = 300 if len(data) > 10 else 60
+            await cache_buglist(connector.source_id, "open", "", data, ttl=ttl)
+            return connector.source_id, data, False
+        except Exception as e:
+            print(f"[BugList] {connector.source_id} failed: {type(e).__name__}: {str(e)[:100]}", flush=True)
+            return connector.source_id, [], False
 
-        elif connector.system_type == "bugzilla":
-            for offset in range(0, 2500, 500):
-                batch = await connector.search("", max_results=500, offset=offset)
-                if not batch:
-                    break
-                all_tickets.extend(batch)
-                if len(batch) < 500:
-                    break
+    tasks = {asyncio.create_task(fetch_one(c)): c.source_id for c in connectors}
+    done, pending = await asyncio.wait(tasks.keys(), timeout=25.0)
 
-        else:
-            all_tickets = await connector.search("", max_results=100)
-
-        data = [dataclasses.asdict(t) for t in all_tickets]
-        await cache_buglist(connector.source_id, "open", "", data, ttl=120)
-        return connector.source_id, data, False
-
-    tasks = [fetch_all_for_connector(c) for c in connectors]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for task in pending:
+        task.cancel()
+        print(f"[BugList] Cancelled slow connector: {tasks[task]}", flush=True)
 
     all_bugs = []
     sources_online = 0
-    for res in results:
-        if isinstance(res, Exception):
-            continue
-        _, bugs, _ = res
-        all_bugs.extend(bugs)
-        sources_online += 1
+    for task in done:
+        try:
+            _, bugs, _ = task.result()
+            all_bugs.extend(bugs)
+            sources_online += 1
+        except Exception:
+            pass
 
     if search:
-        sl = search.lower()
-        all_bugs = [b for b in all_bugs if sl in b.get("title", "").lower() or sl in b.get("ticket_id", "").lower()]
+        sl = search.lower().strip()
+        all_bugs = [
+            b for b in all_bugs
+            if sl in str(b.get("ticket_id", "")).lower()
+            or sl in str(b.get("title", "")).lower()
+            or sl in str(b.get("source_id", "")).lower()
+            or str(b.get("ticket_id", "")).lower().endswith(sl)
+            or str(b.get("ticket_id", "")).lower().startswith(sl)
+        ]
     if severity:
         all_bugs = [b for b in all_bugs if b.get("severity", "") == severity]
     if source:
@@ -124,8 +206,36 @@ async def get_bugs(
     start_idx = (page - 1) * page_size
     page_bugs = all_bugs[start_idx: start_idx + page_size]
 
-    return {"bugs": page_bugs, "total": total, "page": page,
-            "page_size": page_size, "sources_online": sources_online}
+    # Warm cache with more pages in the background after responding
+    asyncio.create_task(background_full_fetch(connectors))
+
+    return {
+        "bugs": page_bugs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "sources_online": sources_online,
+        "sources_total": len(connectors),
+        "partial": len(pending) > 0,
+    }
+
+
+@router.post("/bugs/warm")
+async def warm_bug_cache(user: User = Depends(get_current_user)):
+    connectors = await ConnectorRegistry.get_all_enabled()
+    asyncio.create_task(background_full_fetch(connectors))
+    return {
+        "status": "warming",
+        "connectors": len(connectors),
+        "message": f"Cache warming started for {len(connectors)} connectors in background",
+    }
+
+
+@router.post("/bugs/refresh")
+async def refresh_bugs(user: User = Depends(get_current_user)):
+    from orchestrator.redis_client import purge_buglist_cache
+    cleared = await purge_buglist_cache()
+    return {"cleared_keys": cleared, "message": "Bug list cache cleared. Next GET /bugs will fetch fresh data."}
 
 
 @router.get("/bugs/{bug_id}/status")
@@ -204,12 +314,15 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
 async def get_metrics(user: User = Depends(get_current_user)):
     async with AsyncSessionLocal() as db:
         summary = await get_metrics_summary(db)
-        recent = await list_recent_pipeline_completions(db, limit=100)
+        recent = await list_recent_pipeline_completions(db, limit=10)
 
     connectors = await ConnectorRegistry.get_all_enabled()
 
     severity_counts: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "Unknown": 0}
     source_counts: dict[str, int] = {}
+    total_confidence = 0.0
+    confidence_count = 0
+
     for entry in recent:
         s = (entry.summary or {}).get("unified_severity") or (entry.summary or {}).get("severity", "Unknown")
         if s not in severity_counts:
@@ -217,27 +330,34 @@ async def get_metrics(user: User = Depends(get_current_user)):
         severity_counts[s] += 1
         src = entry.source_id or "unknown"
         source_counts[src] = source_counts.get(src, 0) + 1
+        conf = (entry.summary or {}).get("confidence", 0)
+        if conf:
+            total_confidence += conf
+            confidence_count += 1
 
-    recent4 = recent[:4]
+    avg_confidence = round(total_confidence / confidence_count, 2) if confidence_count else 0
 
     return {
-        "total_triaged": summary["total_triaged"],
         "total_triages": summary["total_triaged"],
+        "total_triaged": summary["total_triaged"],
         "sources_online": len(connectors),
+        "sources_total": len(connectors),
         "by_severity": severity_counts,
         "by_source": source_counts,
+        "avg_confidence": avg_confidence,
         "recent_activity": [
             {
-                "case_id":     e.case_id,
+                "case_id":     e.case_id or "",
                 "bug_id":      e.bug_id,
                 "source_id":   e.source_id or "",
                 "severity":    (e.summary or {}).get("unified_severity") or (e.summary or {}).get("severity", "Unknown"),
                 "confidence":  (e.summary or {}).get("confidence", 0),
-                "duration_ms": e.duration_ms,
-                "engineer_id": e.engineer_id,
+                "root_cause":  ((e.summary or {}).get("root_cause") or "")[:100],
+                "duration_ms": e.duration_ms or 0,
+                "engineer_id": e.engineer_id or "",
                 "created_at":  e.created_at.isoformat() if e.created_at else "",
             }
-            for e in recent4
+            for e in recent
         ],
     }
 

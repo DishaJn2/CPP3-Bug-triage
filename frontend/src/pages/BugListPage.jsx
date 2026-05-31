@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getBugs, getBugStatus } from '../api/bugs'
+import { getBugs, getBugStatus, refreshBugCache } from '../api/bugs'
 import { startTriage } from '../api/triage'
 
 const SRC_CLS = { github: 'sb-gh', jira_apache: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf' }
@@ -244,18 +244,32 @@ function TriagedGroup({ group, onRetriage, retriaging }) {
 }
 
 export default function BugListPage() {
-  const [bugs,       setBugs]       = useState([])
-  const [total,      setTotal]      = useState(0)
-  const [page,       setPage]       = useState(1)
-  const [loading,    setLoading]    = useState(true)
-  const [search,     setSearch]     = useState('')
-  const [severity,   setSeverity]   = useState('')
-  const [source,     setSource]     = useState('')
-  const [activePill, setActivePill] = useState('All')
-  const [triagingId, setTriagingId] = useState(null)
-  const [lastSynced, setLastSynced] = useState(null)
+  const [bugs,         setBugs]         = useState([])
+  const [total,        setTotal]        = useState(0)
+  const [page,         setPage]         = useState(1)
+  const [loading,      setLoading]      = useState(true)
+  const [searchInput,  setSearchInput]  = useState('')
+  const [search,       setSearch]       = useState('')
+  const [severity,     setSeverity]     = useState('')
+  const [source,       setSource]       = useState('')
+  const [activePill,   setActivePill]   = useState('All')
+  const [triagingId,   setTriagingId]   = useState(null)
+  const [lastSynced,   setLastSynced]   = useState(null)
+  const [directBugId,  setDirectBugId]  = useState('')
+  const [refreshing,   setRefreshing]   = useState(false)
+  const [sourcesOnline, setSourcesOnline] = useState(0)
+  const [isPartial,    setIsPartial]    = useState(false)
   const navigate    = useNavigate()
   const intervalRef = useRef(null)
+
+  // Debounce searchInput → search by 500 ms
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearch(searchInput)
+      setPage(1)
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [searchInput])
 
   const fetchBugs = useCallback(async () => {
     setLoading(true)
@@ -263,6 +277,8 @@ export default function BugListPage() {
       const data = await getBugs({ page, severity, source: source || undefined, search })
       setBugs(data.bugs || [])
       setTotal(data.total || 0)
+      setSourcesOnline(data.sources_online || 0)
+      setIsPartial(data.partial || false)
       setLastSynced(new Date())
     } catch (e) {
       console.error('Failed to fetch bugs', e)
@@ -287,6 +303,14 @@ export default function BugListPage() {
     } finally {
       setTriagingId(null)
     }
+  }
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    try { await refreshBugCache() } catch { /* ignore if endpoint errors */ }
+    await new Promise((r) => setTimeout(r, 3000))
+    await fetchBugs()
+    setRefreshing(false)
   }
 
   const syncMinsAgo = lastSynced ? Math.round((Date.now() - lastSynced) / 60000) : null
@@ -337,11 +361,22 @@ export default function BugListPage() {
           <h1>Auto-Discovered Bugs</h1>
           <p>{total} bugs · fetched live · Redis cache 2 min TTL · nothing stored</p>
         </div>
-        {syncMinsAgo !== null && (
-          <span style={{ fontSize: 12, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace', alignSelf: 'flex-start', paddingTop: 6 }}>
-            ↺ Synced {syncMinsAgo} min ago
-          </span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, alignSelf: 'flex-start', paddingTop: 4 }}>
+          {syncMinsAgo !== null && (
+            <span style={{ fontSize: 12, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace' }}>
+              ↺ Synced {syncMinsAgo} min ago
+            </span>
+          )}
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+            title="Clear cache and reload from external systems"
+            style={{ fontFamily: 'inherit' }}
+          >
+            {refreshing ? 'Refreshing…' : '↺ Refresh'}
+          </button>
+        </div>
       </div>
 
       {/* Filter bar */}
@@ -350,9 +385,9 @@ export default function BugListPage() {
           <span className="search-icon">🔍</span>
           <input
             className="form-input search-input"
-            placeholder="Search bugs…"
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1) }}
+            placeholder="Search by ID, title, keyword..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
         </div>
 
@@ -392,6 +427,27 @@ export default function BugListPage() {
         </div>
       </div>
 
+      {/* Direct Triage bar */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <input
+          className="form-input"
+          style={{ flex: 1, maxWidth: 320 }}
+          placeholder="Enter bug ID to triage directly..."
+          value={directBugId}
+          onChange={(e) => setDirectBugId(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && directBugId.trim()) handleTriage(directBugId.trim())
+          }}
+        />
+        <button
+          className="btn btn-teal btn-sm"
+          disabled={!directBugId.trim() || triagingId === directBugId.trim()}
+          onClick={() => handleTriage(directBugId.trim())}
+        >
+          {triagingId === directBugId.trim() ? '…' : 'Triage'}
+        </button>
+      </div>
+
       {/* Legend bar */}
       <div className="card" style={{ padding: '10px 14px', marginBottom: 10 }}>
         <div className="legend-bar">
@@ -414,6 +470,22 @@ export default function BugListPage() {
         </div>
       )}
 
+      {/* Partial results banner */}
+      {!loading && isPartial && bugs.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10,
+          background: 'var(--orange-lt)', border: '1px solid var(--orange-bd)',
+          borderRadius: 7, padding: '8px 14px', fontSize: 12, color: 'var(--orange)',
+        }}>
+          <span style={{ flex: 1 }}>
+            ⚠ Showing partial results — some sources are still loading ({sourcesOnline} of {sourcesOnline} responded)
+          </span>
+          <button className="btn btn-ghost btn-sm" onClick={handleRefresh} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+      )}
+
       {/* Bug rows */}
       {loading ? (
         <div>
@@ -430,9 +502,45 @@ export default function BugListPage() {
           ))}
         </div>
       ) : visibleBugs.length === 0 ? (
-        <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text3)', fontSize: 13 }}>
-          No bugs match the current filter.
-        </div>
+        (() => {
+          const hasFilters = !!(search || severity || source || activePill !== 'All')
+          if (hasFilters) {
+            return (
+              <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text3)', fontSize: 13 }}>
+                <div style={{ marginBottom: 12 }}>No bugs match the current filter.</div>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => {
+                    setSearchInput('')
+                    setSearch('')
+                    setSeverity('')
+                    setSource('')
+                    setActivePill('All')
+                    setPage(1)
+                  }}
+                >
+                  Clear filters
+                </button>
+              </div>
+            )
+          }
+          return (
+            <div className="card" style={{ textAlign: 'center', padding: '40px' }}>
+              <div style={{ fontSize: 14, color: 'var(--text2)', fontWeight: 600, marginBottom: 6 }}>
+                Loading bugs from external systems...
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 6 }}>
+                This may take 15–20 seconds on first load.
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 16 }}>
+                Bugs are cached for 5 minutes after first fetch.
+              </div>
+              <button className="btn btn-teal btn-sm" onClick={fetchBugs} disabled={loading}>
+                {loading ? 'Loading…' : 'Retry'}
+              </button>
+            </div>
+          )
+        })()
       ) : (
         <div>
           {/* Triaged groups first */}

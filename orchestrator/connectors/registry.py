@@ -18,6 +18,7 @@ _cache_loaded: bool = False
 
 
 async def load_connectors_from_db() -> list[BaseConnector]:
+    global _connector_cache, _cache_loaded
     try:
         from ..db.session import AsyncSessionLocal
         from ..db.repositories.source_registry import get_enabled_sources
@@ -30,28 +31,32 @@ async def load_connectors_from_db() -> list[BaseConnector]:
                 log.warning("Unknown system_type", system_type=row.system_type)
                 continue
             token = os.environ.get(row.auth_secret_ref or "", "")
-            connector = cls(
-                source_id=row.source_id,
-                system_type=row.system_type,
-                base_url=row.base_url,
-                project_key=row.project_key or "",
-                ticket_prefix=row.ticket_prefix or "",
-                token=token,
-            )
-            connectors.append(connector)
+            try:
+                connector = cls(
+                    source_id=row.source_id,
+                    system_type=row.system_type,
+                    base_url=row.base_url,
+                    project_key=row.project_key or "",
+                    ticket_prefix=row.ticket_prefix or "",
+                    token=token,
+                )
+                connectors.append(connector)
+            except Exception as e:
+                log.warning("Failed to init connector", source_id=row.source_id, error=str(e))
+        _connector_cache = connectors
+        _cache_loaded = True
         return connectors
     except Exception as e:
         log.warning("Failed to load connectors from DB", error=str(e))
-        return []
+        return _connector_cache  # return whatever we have
 
 
 class ConnectorRegistry:
     @classmethod
     async def get_all_enabled(cls) -> list[BaseConnector]:
-        global _connector_cache, _cache_loaded
-        if not _cache_loaded:
-            _connector_cache = await load_connectors_from_db()
-            _cache_loaded = True
+        global _cache_loaded
+        if not _cache_loaded or len(_connector_cache) == 0:
+            await load_connectors_from_db()
         return _connector_cache
 
     @classmethod

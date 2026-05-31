@@ -16,8 +16,10 @@ class CrossSystemFetchAgent(BaseAgent):
     async def run(self, context: dict) -> dict:
         primary_ticket = context.get("primary_ticket")
         source_id = context.get("source_id", "")
+        keywords = context.get("keywords", [])
 
         if not primary_ticket:
+            print("[CrossSystemFetch] No primary ticket in context", flush=True)
             context["related_tickets"] = []
             context["sources_queried"] = []
             return context
@@ -25,17 +27,18 @@ class CrossSystemFetchAgent(BaseAgent):
         groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY", ""))
         model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-        # ── STEP A: LLM decides the best search query ────────────────────────
-        search_query = await self._llm_decide_query(groq_client, model, primary_ticket)
-        log.info("CrossSystemFetch: generated query", query=search_query)
+        # Step A: LLM generates optimal search query
+        search_query = await self._generate_query(groq_client, model, primary_ticket, keywords)
+        print(f"[CrossSystemFetch] Query: '{search_query}'", flush=True)
 
-        # ── STEP B: search ALL other connectors in parallel ──────────────────
+        # Step B: Search ALL other connectors in parallel
         all_connectors = await ConnectorRegistry.get_all_enabled()
-
         other_connectors = [
             c for c in all_connectors
-            if c.source_id != source_id and c.system_type != "confluence"
+            if c.source_id != source_id and c.system_type not in ("confluence",)
         ]
+
+        print(f"[CrossSystemFetch] Searching {len(other_connectors)} other connectors: {[c.source_id for c in other_connectors]}", flush=True)
 
         if not other_connectors:
             context["related_tickets"] = []
@@ -48,218 +51,207 @@ class CrossSystemFetchAgent(BaseAgent):
             try:
                 results = await asyncio.wait_for(
                     connector.search(search_query, max_results=5),
-                    timeout=10.0,
+                    timeout=12.0,
                 )
+                print(f"[CrossSystemFetch] {connector.source_id}: {len(results or [])} results", flush=True)
                 return results or []
+            except asyncio.TimeoutError:
+                print(f"[CrossSystemFetch] {connector.source_id}: TIMEOUT", flush=True)
+                return []
             except Exception as e:
-                log.warning("CrossSystemFetch: connector search failed",
-                            source=connector.source_id, error=str(e))
+                print(f"[CrossSystemFetch] {connector.source_id}: ERROR {str(e)[:80]}", flush=True)
                 return []
 
-        search_results = await asyncio.gather(
-            *[safe_search(c) for c in other_connectors],
-            return_exceptions=False,
-        )
+        search_results = await asyncio.gather(*[safe_search(c) for c in other_connectors])
 
         candidates = []
         for batch in search_results:
-            candidates.extend(batch)
+            if batch:
+                candidates.extend(batch)
 
-        log.info("CrossSystemFetch: candidates found",
-                 count=len(candidates), sources=sources_queried)
+        print(f"[CrossSystemFetch] Total candidates: {len(candidates)}", flush=True)
 
         if not candidates:
             context["related_tickets"] = []
             context["sources_queried"] = sources_queried
             return context
 
-        # ── STEP C: LLM scores every candidate against ALL fields ─────────────
-        scored = await self._llm_score(groq_client, model, primary_ticket, candidates)
+        # Step C: LLM scores candidates
+        scored = await self._score_candidates(groq_client, model, primary_ticket, candidates)
+        print(f"[CrossSystemFetch] Scored: {len(scored)}", flush=True)
 
-        log.info("CrossSystemFetch: scored results",
-                 total=len(scored),
-                 above_threshold=len([s for s in scored if s.get("similarity_score", 0) >= 0.50]))
+        # Step D: Filter below 0.25, sort descending
+        filtered = [s for s in scored if s.get("similarity_score", 0) >= 0.25]
 
-        # ── STEP D: filter < 0.50, sort descending ───────────────────────────
-        filtered = [s for s in scored if s.get("similarity_score", 0) >= 0.50]
+        # If LLM scoring returned nothing, try keyword-based simple scoring
+        if not filtered and candidates:
+            try:
+                simple_scored = await self._simple_score(candidates, primary_ticket)
+                filtered = [s for s in simple_scored if s.get("similarity_score", 0) >= 0.25]
+            except Exception as e:
+                print(f"[CrossSystemFetch] Simple scoring failed: {e}", flush=True)
+
         filtered.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
+        print(f"[CrossSystemFetch] Final related tickets: {len(filtered[:8])}", flush=True)
 
         context["related_tickets"] = filtered[:8]
         context["sources_queried"] = sources_queried
         return context
 
-    # ─────────────────────────────────────────────────────────────────────────
+    async def _simple_score(self, candidates, primary):
+        primary_keywords = primary.get("keywords", [])
+        primary_title_words = set(primary.get("title", "").lower().split())
+        result = []
+        for c in candidates:
+            try:
+                cd = dataclasses.asdict(c) if hasattr(c, '__dataclass_fields__') else c
+                candidate_title = cd.get("title", "").lower()
+                candidate_desc = (cd.get("description") or "").lower()
 
-    async def _llm_decide_query(self, client, model: str, ticket: dict) -> str:
-        """Step A: LLM reads all ticket fields and decides the best search query."""
+                keyword_hits = sum(
+                    1 for kw in primary_keywords
+                    if kw.lower() in candidate_title or kw.lower() in candidate_desc
+                )
+                title_word_hits = len(primary_title_words & set(candidate_title.split()))
+                score = min(0.9, (keyword_hits * 0.15) + (title_word_hits * 0.10))
+
+                if score >= 0.25:
+                    label = "Good Match" if score >= 0.60 else "Fair Match" if score >= 0.40 else "Possible Match"
+                    result.append({
+                        **cd,
+                        "similarity_score": round(score, 2),
+                        "similarity_label": label,
+                        "similarity_reason": f"Keyword overlap: {keyword_hits} matching terms found",
+                        "similarity_matching_fields": ["title", "description"],
+                    })
+            except Exception:
+                pass
+        result.sort(key=lambda x: x.get("similarity_score", 0), reverse=True)
+        return result[:5]
+
+    async def _generate_query(self, client, model, ticket, keywords):
         title = ticket.get("title", "")
-        component = ticket.get("component", "") or ""
-        description = (ticket.get("description") or "")[:400]
-        error_excerpt = (ticket.get("error_excerpt") or "")[:300]
-        keywords = ticket.get("keywords", [])
-        steps = (ticket.get("steps_to_reproduce") or "")[:200]
+        description = (ticket.get("description") or "")[:300]
+        component = ticket.get("component") or ""
+        error_excerpt = (ticket.get("error_excerpt") or "")[:200]
 
-        prompt = f"""You are deciding the best search query to find related bugs
-in other tracking systems (JIRA, Bugzilla, GitHub Issues).
+        prompt = f"""Generate a 3-5 keyword search query for finding related bugs in JIRA and Bugzilla.
 
-Primary bug:
-  Title:       {title}
-  Component:   {component}
-  Description: {description}
-  Error:       {error_excerpt if error_excerpt else 'not available'}
-  Keywords:    {', '.join(keywords[:8]) if keywords else 'none'}
-  Steps:       {steps if steps else 'not available'}
+Bug: {title}
+Component: {component}
+Keywords already extracted: {', '.join(keywords[:5])}
+Error/Description snippet: {error_excerpt or description[:150]}
 
-Generate ONE search query (maximum 10 words) that will find
-semantically related bugs even if they use different vocabulary.
-Focus on the core technical concept, not the surface words.
-Think about what the underlying technical issue is and search for that.
+Rules:
+- Use specific technical terms that appear in the bug title/description
+- These exact words should appear in related bug titles
+- 3-5 keywords maximum
+- No generic words: error, bug, issue, fail, crash, fix, problem
 
 Examples:
-- Bug about "NullPointerException in StorageController" → "storage controller null pointer concurrent thread safety"
-- Bug about "DataFrame methods behind is_remote_only()" → "spark connect remote only dataframe static evaluation"
-- Bug about "DSv2 streaming SupportsMetadataColumns" → "structured streaming metadata columns schema source"
+"Optimizer failure: NormalizeCTEIds brakes CTE references for queries with nested CTEs"
+→ NormalizeCTEIds CTE InlineCTE optimizer
 
-Return the search query string ONLY. No explanation. No quotes."""
+"PySpark DataFrame methods behind is_remote_only() statically evaluate to Union"
+→ is_remote_only DataFrame static Union
+
+"DSv2 streaming doesn't support SupportsMetadataColumns"
+→ SupportsMetadataColumns DSv2 streaming metadata
+
+Return ONLY the keywords separated by spaces. Nothing else."""
 
         try:
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=30,
+                max_tokens=25,
                 temperature=0.0,
             )
-            query = response.choices[0].message.content.strip().strip('"\'').split('\n')[0].strip()
-            return query if query else title[:60]
+            query = response.choices[0].message.content.strip().strip('"\'').split('\n')[0]
+            return query if query else " ".join(keywords[:3])
         except Exception as e:
-            log.warning("CrossSystemFetch: LLM query generation failed", error=str(e))
-            return " ".join(title.split()[:6])
+            print(f"[CrossSystemFetch] Query generation failed: {e}", flush=True)
+            return " ".join(keywords[:4]) if keywords else title[:50]
 
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _llm_score(self, client, model: str, primary: dict, candidates: list) -> list[dict]:
-        """Step C: LLM scores every candidate against ALL fields of primary in one call."""
+    async def _score_candidates(self, client, model, primary, candidates):
         primary_text = f"""PRIMARY BUG:
-  Title:           {primary.get('title', '')}
-  Component:       {primary.get('component', '') or 'not specified'}
-  Description:     {(primary.get('description') or '')[:400]}
-  Keywords/Tags:   {', '.join(primary.get('keywords', [])[:8])}
-  Severity:        {primary.get('severity', '') or 'unknown'}
-  Status:          {primary.get('status', '')}
-  Customer impact: {primary.get('customer_impact', '') or 'not specified'}
-  Steps to repro:  {(primary.get('steps_to_reproduce') or 'not provided')[:200]}
-  Workaround:      {primary.get('workaround', '') or 'none'}
-  Error excerpt:   {(primary.get('error_excerpt') or 'not provided')[:250]}
-  Comments:        {' | '.join((primary.get('engineer_comments') or primary.get('recent_comments') or [])[:3])}"""
+Title: {primary.get('title', '')}
+Component: {primary.get('component', '') or 'unknown'}
+Description: {(primary.get('description') or '')[:300]}
+Error: {(primary.get('error_excerpt') or '')[:200]}
+Keywords: {', '.join(primary.get('keywords', [])[:8])}
+Severity: {primary.get('severity', '') or 'unknown'}"""
 
         candidates_text = ""
-        capped = candidates[:10]
+        capped = candidates[:8]
         for i, c in enumerate(capped):
             try:
-                c_dict = dataclasses.asdict(c) if hasattr(c, '__dataclass_fields__') else c
+                cd = dataclasses.asdict(c) if hasattr(c, '__dataclass_fields__') else (c if isinstance(c, dict) else {})
+                candidates_text += f"""
+CANDIDATE {i+1} (id={cd.get('ticket_id','?')}, source={cd.get('source_id','?')}):
+  Title: {cd.get('title','')}
+  Component: {cd.get('component','') or 'unknown'}
+  Description: {(cd.get('description') or '')[:150]}
+  Severity: {cd.get('severity','') or 'unknown'}
+  Status: {cd.get('status','')}"""
             except Exception:
-                c_dict = {}
-            candidates_text += f"""
-CANDIDATE {i + 1} — {c_dict.get('ticket_id', '')} ({c_dict.get('source_id', '')}):
-  Title:         {c_dict.get('title', '')}
-  Component:     {c_dict.get('component', '') or 'not specified'}
-  Description:   {(c_dict.get('description') or '')[:200]}
-  Severity:      {c_dict.get('severity', '') or 'unknown'}
-  Status:        {c_dict.get('status', '')}
-  Error excerpt: {(c_dict.get('error_excerpt') or 'none')[:150]}
-  Comments:      {' | '.join((c_dict.get('engineer_comments') or c_dict.get('recent_comments') or [])[:2])}"""
+                candidates_text += f"\nCANDIDATE {i+1}: (parse error)"
 
         prompt = f"""{primary_text}
 {candidates_text}
 
-Score each candidate's similarity to the primary bug.
-Consider ALL of these factors:
-  - Same error type, exception class, or crash signature
-  - Same component, subsystem, or module
-  - Overlapping occurrence timestamps
-  - Similar steps to reproduce or trigger conditions
-  - Same customer impact pattern
-  - Matching workarounds or recent changes
-  - Common keywords, tags, or error strings in comments
+Score each candidate's similarity to the primary bug (0.0 to 1.0).
+Consider: same error type, same component, same root cause, similar description.
 
-Scoring rules:
-  >= 0.90 → "Excellent Match" — same root cause likely
-  >= 0.75 → "Good Match" — strongly related
-  >= 0.50 → "Fair Match" — worth reviewing
-  <  0.50 → "Weak Match" — not relevant
+Return a JSON object with this exact format:
+{{
+  "scores": [
+    {{
+      "ticket_id": "exact id from candidate",
+      "similarity_score": 0.85,
+      "similarity_label": "Good Match",
+      "similarity_reason": "Same component and error type",
+      "similarity_matching_fields": ["title", "component"]
+    }}
+  ]
+}}
 
-Return a JSON array with one entry per candidate in the SAME ORDER:
-[
-  {{
-    "ticket_id": "exact ticket_id from candidate",
-    "similarity_score": 0.94,
-    "similarity_label": "Excellent Match",
-    "similarity_reason": "specific reason referencing actual field values",
-    "similarity_matching_fields": ["title", "component", "error_excerpt"]
-  }}
-]
-
-IMPORTANT: Return valid JSON array ONLY. No explanation. No markdown."""
+Labels: >=0.75 Excellent Match, >=0.50 Good Match, >=0.30 Fair Match, <0.30 Weak Match
+Return valid JSON only."""
 
         try:
             response = await client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1500,
+                max_tokens=1000,
                 temperature=0.0,
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content.strip()
-
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                scored_list = next(
-                    (v for v in parsed.values() if isinstance(v, list)), []
-                )
-            elif isinstance(parsed, list):
-                scored_list = parsed
-            else:
-                scored_list = []
+            scores_list = parsed.get("scores", [])
 
             result = []
-            for entry in scored_list:
-                score = entry.get("similarity_score", 0)
+            for entry in scores_list:
                 ticket_id = entry.get("ticket_id", "")
-
                 original = None
                 for c in capped:
                     try:
-                        c_id = c.ticket_id if hasattr(c, 'ticket_id') else c.get('ticket_id', '')
-                        if c_id == ticket_id:
+                        cid = c.ticket_id if hasattr(c, 'ticket_id') else c.get('ticket_id', '')
+                        if str(cid) == str(ticket_id):
                             original = dataclasses.asdict(c) if hasattr(c, '__dataclass_fields__') else c
                             break
                     except Exception:
                         pass
-
                 if original:
                     result.append({
                         **original,
-                        "similarity_score": score,
+                        "similarity_score": entry.get("similarity_score", 0),
                         "similarity_label": entry.get("similarity_label", "Fair Match"),
                         "similarity_reason": entry.get("similarity_reason", ""),
                         "similarity_matching_fields": entry.get("similarity_matching_fields", []),
                     })
-
             return result
-
         except Exception as e:
-            log.warning("CrossSystemFetch: LLM scoring failed", error=str(e))
-            result = []
-            for c in capped[:5]:
-                try:
-                    c_dict = dataclasses.asdict(c) if hasattr(c, '__dataclass_fields__') else c
-                    result.append({
-                        **c_dict,
-                        "similarity_score": 0.50,
-                        "similarity_label": "Fair Match",
-                        "similarity_reason": "LLM scoring unavailable — keyword match",
-                        "similarity_matching_fields": ["title"],
-                    })
-                except Exception:
-                    pass
-            return result
+            print(f"[CrossSystemFetch] Scoring failed: {e}", flush=True)
+            return []

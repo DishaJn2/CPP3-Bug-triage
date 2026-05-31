@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { getMetrics } from '../api/bugs'
 
 const SOURCE_ICON = { jira_apache: 'J', bugzilla: 'BZ', github: 'GH', confluence: 'CF' }
@@ -32,22 +33,21 @@ function StatCard({ label, value, color, topBorder, sub }) {
 
 export default function DashboardPage() {
   const [metrics, setMetrics] = useState(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     getMetrics().then(setMetrics).catch(console.error)
   }, [])
 
-  const bySev      = metrics?.by_severity || {}
-  const triaged    = metrics?.total_triaged ?? metrics?.total_triages ?? 0
-  const critical   = (bySev.P0 || 0) + (bySev.P1 || 0)
-  const online     = metrics?.sources_online ?? Object.keys(metrics?.by_source || {}).length
-  const recentAct  = metrics?.recent_activity || []
-
-  const avgConf = recentAct.length > 0
-    ? Math.round(recentAct.reduce((sum, e) => sum + (e.confidence || 0), 0) / recentAct.length * 100)
+  const bySev     = metrics?.by_severity || {}
+  const triaged   = metrics?.total_triages ?? metrics?.total_triaged ?? 0
+  const critical  = (bySev.P0 || 0) + (bySev.P1 || 0)
+  const pending   = (bySev.P2 || 0) + (bySev.P3 || 0)
+  const online    = metrics?.sources_online ?? 0
+  const recentAct = metrics?.recent_activity || []
+  const avgConf   = metrics?.avg_confidence != null
+    ? Math.round(metrics.avg_confidence * 100)
     : null
-
-  const lastTriageAt = recentAct[0]?.created_at || null
 
   return (
     <div>
@@ -60,11 +60,11 @@ export default function DashboardPage() {
 
       {/* Stat cards */}
       <div className="stat-grid">
-        <StatCard label="Total Triages"    value={triaged}              color="blue"   topBorder="blue-t"   sub="AI-processed" />
-        <StatCard label="P0 / P1 Critical" value={critical}             color="red"    topBorder="red-t"    sub="needs immediate action" />
-        <StatCard label="Sources Online"   value={online || '—'}        color="green"  topBorder="green-t"  sub="connected systems" />
-        <StatCard label="Avg Confidence"   value={avgConf != null ? `${avgConf}%` : '—'} color="teal" topBorder="teal-t" sub="recent triages" />
-        <StatCard label="Last Triage"      value={timeAgo(lastTriageAt)} color="text2" topBorder="" sub="most recent activity" />
+        <StatCard label="Total Triages"    value={triaged}                              color="blue"   topBorder="blue-t"   sub="AI-processed" />
+        <StatCard label="P0 / P1 Critical" value={critical}                             color="red"    topBorder="red-t"    sub="needs immediate action" />
+        <StatCard label="Sources Online"   value={online || '—'}                        color="green"  topBorder="green-t"  sub="connected systems" />
+        <StatCard label="Avg Confidence"   value={avgConf != null ? `${avgConf}%` : '—'} color="teal" topBorder="teal-t"  sub="recent triages" />
+        <StatCard label="Pending P2 / P3"  value={pending}                              color="amber"  topBorder="amber-t"  sub="lower priority" />
       </div>
 
       {/* 2-col lower grid */}
@@ -101,31 +101,54 @@ export default function DashboardPage() {
           </div>
           {recentAct.length === 0 ? (
             <p style={{ color: 'var(--text3)', fontSize: 13, margin: 0 }}>No triage history yet.</p>
-          ) : recentAct.map((entry, i) => {
-            const conf   = entry.confidence ? (entry.confidence * 100).toFixed(0) : null
-            const srcCls = SRC_CLS[entry.source_id] || 'sb-jira'
-            const srcLbl = SRC_LBL[entry.source_id] || (entry.source_id || '?').toUpperCase().slice(0, 4)
-            return (
-              <div key={entry.case_id || i} className="act-row">
-                <span className={`sev ${SEV_CLS[entry.severity] || 'sev-unk'}`}>{entry.severity || '?'}</span>
-                <div className="act-info">
-                  <div className="act-title">
-                    <strong style={{ color: 'var(--text)', fontFamily: 'JetBrains Mono, monospace', fontSize: 11 }}>
-                      {entry.case_id ? `BT-${entry.case_id.slice(-4).toUpperCase()}` : '—'}
-                    </strong>
-                    {' '}
-                    {entry.bug_id}
-                  </div>
-                  <div className="act-meta">
-                    {entry.source_id && <span className={`sb ${srcCls}`} style={{ marginRight: 5 }}>{srcLbl}</span>}
-                    {conf && <span>{conf}% conf</span>}
-                    {entry.duration_ms && <span> · {(entry.duration_ms / 1000).toFixed(1)}s</span>}
-                    {entry.created_at && <span> · {timeAgo(entry.created_at)}</span>}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--text3)' }}>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>Bug ID</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>Sev</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>Conf</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>Root Cause</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>Dur</th>
+                  <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 600 }}>When</th>
+                  <th style={{ padding: '4px 8px' }} />
+                </tr>
+              </thead>
+              <tbody>
+                {recentAct.map((entry, i) => {
+                  const conf = entry.confidence ? `${(entry.confidence * 100).toFixed(0)}%` : '—'
+                  const dur  = entry.duration_ms ? `${(entry.duration_ms / 1000).toFixed(1)}s` : '—'
+                  return (
+                    <tr key={entry.case_id || i} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, monospace', color: 'var(--text2)' }}>
+                        {entry.bug_id}
+                      </td>
+                      <td style={{ padding: '5px 8px' }}>
+                        <span className={`sev ${SEV_CLS[entry.severity] || 'sev-unk'}`}>{entry.severity || '?'}</span>
+                      </td>
+                      <td style={{ padding: '5px 8px', color: 'var(--teal)', fontFamily: 'JetBrains Mono, monospace' }}>{conf}</td>
+                      <td style={{ padding: '5px 8px', color: 'var(--text3)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {entry.root_cause || '—'}
+                      </td>
+                      <td style={{ padding: '5px 8px', color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap' }}>{dur}</td>
+                      <td style={{ padding: '5px 8px', color: 'var(--text3)', whiteSpace: 'nowrap' }}>{timeAgo(entry.created_at)}</td>
+                      <td style={{ padding: '5px 8px' }}>
+                        {entry.case_id && (
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            style={{ fontSize: 11 }}
+                            onClick={() => navigate(`/triage/${entry.case_id}?from=history`)}
+                          >
+                            View
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>

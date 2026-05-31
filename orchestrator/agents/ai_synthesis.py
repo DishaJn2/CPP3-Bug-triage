@@ -30,6 +30,7 @@ class AISynthesisAgent(BaseAgent):
         related = context.get("related_tickets") or []
         kb_articles = context.get("kb_articles") or []
         customer_cases = context.get("customer_cases") or []
+        print(f"[AISynthesis] Starting with {len(related)} related tickets and {len(kb_articles)} KB articles", flush=True)
 
         groq_api_key = os.getenv("GROQ_API_KEY", "")
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -65,6 +66,7 @@ class AISynthesisAgent(BaseAgent):
             synthesis = self._keyword_fallback(primary)
 
         context["synthesis"] = synthesis.model_dump()
+        print(f"[AISynthesis] Complete. Severity: {synthesis.unified_severity}, Confidence: {synthesis.confidence}", flush=True)
         return context
 
     def _build_prompt(self, primary: dict, related: list, kb_articles: list, customer_cases: list) -> str:

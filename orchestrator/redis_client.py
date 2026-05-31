@@ -73,6 +73,20 @@ async def cache_case_result(case_id: str, data: dict, ttl: int = 3600) -> None:
         log.warning("cache_case_result failed", error=str(e))
 
 
+async def purge_buglist_cache() -> int:
+    try:
+        r = await get_redis()
+        keys = []
+        async for key in r.scan_iter("buglist:*"):
+            keys.append(key)
+        if keys:
+            await r.delete(*keys)
+        return len(keys)
+    except Exception as e:
+        log.warning("purge_buglist_cache failed", error=str(e))
+        return 0
+
+
 async def get_cached_case_result(case_id: str) -> dict | None:
     try:
         r = await get_redis()
