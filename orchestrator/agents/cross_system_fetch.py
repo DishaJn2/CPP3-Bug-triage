@@ -31,14 +31,37 @@ class CrossSystemFetchAgent(BaseAgent):
         search_query = await self._generate_query(groq_client, model, primary_ticket, keywords)
         print(f"[CrossSystemFetch] Query: '{search_query}'", flush=True)
 
-        # Step B: Search ALL other connectors in parallel
+        # Step B: Search other bug-tracker connectors in parallel
         all_connectors = await ConnectorRegistry.get_all_enabled()
         other_connectors = [
             c for c in all_connectors
-            if c.source_id != source_id and c.system_type not in ("confluence",)
+            if c.source_id != source_id
+            and c.system_type not in ("confluence", "customer_portal")
         ]
 
-        print(f"[CrossSystemFetch] Searching {len(other_connectors)} other connectors: {[c.source_id for c in other_connectors]}", flush=True)
+        # Prioritize connectors by relevance to source project
+        source_project = ""
+        for c in all_connectors:
+            if c.source_id == source_id:
+                source_project = c.project_key or ""
+                break
+
+        def connector_priority(c):
+            project = (c.project_key or "").lower()
+            src_proj = source_project.lower()
+            org_word = src_proj.split("/")[0] if "/" in src_proj else src_proj.split("-")[0]
+            if org_word and org_word in project:
+                return 0   # Same org — highest priority
+            if c.system_type == "jira_apache":
+                return 1   # JIRA always valuable for cross-system
+            if c.system_type == "bugzilla":
+                return 2
+            return 3       # Other GitHub repos — lowest priority
+
+        other_connectors.sort(key=connector_priority)
+        other_connectors = other_connectors[:5]  # Limit to 5 most relevant
+
+        print(f"[CrossSystemFetch] Searching {len(other_connectors)} connectors: {[c.source_id for c in other_connectors]}", flush=True)
 
         if not other_connectors:
             context["related_tickets"] = []

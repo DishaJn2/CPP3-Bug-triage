@@ -1,7 +1,8 @@
-"""Initialize the database and seed all data sources, CMDB, and SLA config."""
+"""Initialize the database and seed all data sources, CMDB, SLA config, users, and customer cases."""
 import asyncio
 import sys
 import os
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,7 +11,7 @@ load_dotenv()
 
 from orchestrator.db.base import Base
 from orchestrator.db.session import engine, AsyncSessionLocal
-from orchestrator.db.models import SourceRegistry, CMDBTeamRegistry, SLAConfig
+from orchestrator.db.models import SourceRegistry, CMDBTeamRegistry, SLAConfig, UserRole, CustomerCase
 from sqlalchemy import select
 
 DEMO_SOURCES = [
@@ -135,23 +136,45 @@ DEMO_SOURCES = [
         "ticket_prefix": "FLINK",
         "enabled": True,
     },
+    {
+        "source_id": "internal-confluence",
+        "display_name": "HPE Knowledge Base (Confluence)",
+        "system_type": "confluence",
+        "base_url": "http://localhost:8000/mock/confluence",
+        "auth_type": "basic",
+        "auth_secret_ref": "",
+        "project_key": "SPARK",
+        "ticket_prefix": "CONF",
+        "enabled": True,
+    },
+    {
+        "source_id": "hpe-customer-portal",
+        "display_name": "HPE Customer Portal (Cases)",
+        "system_type": "customer_portal",
+        "base_url": "http://localhost:8000/mock/customer-portal",
+        "auth_type": "none",
+        "auth_secret_ref": "",
+        "project_key": "",
+        "ticket_prefix": "CASE",
+        "enabled": True,
+    },
 ]
 
 DEMO_CMDB = [
-    {"component_name": "SQL", "team_name": "Apache Spark", "source_id": "apache-spark-jira"},
-    {"component_name": "Core", "team_name": "Apache Spark", "source_id": "apache-spark-jira"},
-    {"component_name": "MLlib", "team_name": "Apache Spark", "source_id": "apache-spark-jira"},
-    {"component_name": "Streaming", "team_name": "Apache Spark", "source_id": "apache-spark-jira"},
-    {"component_name": "PySpark", "team_name": "Apache Spark", "source_id": "apache-spark-github"},
-    {"component_name": "Network", "team_name": "Apache Kafka", "source_id": "apache-kafka-jira"},
-    {"component_name": "Replication", "team_name": "Apache Kafka", "source_id": "apache-kafka-jira"},
-    {"component_name": "Streams", "team_name": "Apache Kafka", "source_id": "apache-kafka-jira"},
-    {"component_name": "DOM", "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
+    {"component_name": "SQL",          "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
+    {"component_name": "Core",         "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
+    {"component_name": "MLlib",        "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
+    {"component_name": "Streaming",    "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
+    {"component_name": "PySpark",      "team_name": "Apache Spark",   "source_id": "apache-spark-github"},
+    {"component_name": "Network",      "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
+    {"component_name": "Replication",  "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
+    {"component_name": "Streams",      "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
+    {"component_name": "DOM",          "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
     {"component_name": "JavaScript Engine", "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
-    {"component_name": "Graphics", "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
-    {"component_name": "YARN", "team_name": "Hadoop YARN", "source_id": "apache-hadoop-jira", "escalation_contact": "dev@hadoop.apache.org"},
-    {"component_name": "Runtime", "team_name": "Flink Runtime", "source_id": "apache-flink-jira", "escalation_contact": "dev@flink.apache.org"},
-    {"component_name": "Scheduler", "team_name": "Kubernetes SIG", "source_id": "kubernetes-github", "escalation_contact": "sig-scheduling@kubernetes.io"},
+    {"component_name": "Graphics",     "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
+    {"component_name": "YARN",         "team_name": "Hadoop YARN",    "source_id": "apache-hadoop-jira", "escalation_contact": "dev@hadoop.apache.org"},
+    {"component_name": "Runtime",      "team_name": "Flink Runtime",  "source_id": "apache-flink-jira", "escalation_contact": "dev@flink.apache.org"},
+    {"component_name": "Scheduler",    "team_name": "Kubernetes SIG", "source_id": "kubernetes-github", "escalation_contact": "sig-scheduling@kubernetes.io"},
 ]
 
 DEMO_SLA = [
@@ -170,6 +193,67 @@ DEMO_SLA = [
         "p2_resolution_hours": 168,
         "p3_resolution_hours": 336,
         "at_risk_threshold_pct": 15,
+    },
+]
+
+DEMO_USERS = [
+    {"email": "disha@hpe.com",     "password": "password123", "role": "engineer",  "display_name": "Disha Jain"},
+    {"email": "anuj@hpe.com",      "password": "password123", "role": "engineer",  "display_name": "Anuj Modani"},
+    {"email": "admin@hpe.com",     "password": "admin123",    "role": "admin",     "display_name": "Admin User"},
+    {"email": "customer@acme.com", "password": "customer123", "role": "customer",  "display_name": "Acme Customer"},
+    {"email": "exec@hpe.com",      "password": "exec123",     "role": "executive", "display_name": "HPE Executive"},
+]
+
+MOCK_CUSTOMER_CASES = [
+    {
+        "case_id": "CASE-10041",
+        "customer": "Acme Corporation",
+        "severity": "Critical",
+        "title": "CTE query optimizer crash blocking production ETL pipeline",
+        "related_bug_keywords": ["NormalizeCTEIds", "InlineCTE", "CTE", "optimizer"],
+        "impact": "Production ETL pipeline down. 3 data engineers blocked. Revenue reporting delayed.",
+        "opened_at": datetime(2026, 5, 28, 9, 0, 0, tzinfo=timezone.utc),
+        "status": "Open",
+    },
+    {
+        "case_id": "CASE-10038",
+        "customer": "GlobalTech Industries",
+        "severity": "High",
+        "title": "PySpark DataFrame type annotation failures in CI pipeline",
+        "related_bug_keywords": ["is_remote_only", "DataFrame", "typechecking", "Union"],
+        "impact": "CI/CD blocked for 2 teams. 15 engineers unable to merge PRs.",
+        "opened_at": datetime(2026, 5, 27, 14, 0, 0, tzinfo=timezone.utc),
+        "status": "Open",
+    },
+    {
+        "case_id": "CASE-10035",
+        "customer": "DataStream Analytics",
+        "severity": "High",
+        "title": "Structured streaming metadata columns not accessible from DSv2 source",
+        "related_bug_keywords": ["SupportsMetadataColumns", "DSv2", "streaming", "metadata"],
+        "impact": "Real-time analytics dashboard missing metadata. Customer SLA at risk.",
+        "opened_at": datetime(2026, 5, 26, 11, 0, 0, tzinfo=timezone.utc),
+        "status": "Open",
+    },
+    {
+        "case_id": "CASE-10029",
+        "customer": "FinTech Solutions",
+        "severity": "Medium",
+        "title": "Kafka consumer group rebalancing causing processing delays",
+        "related_bug_keywords": ["consumer", "rebalance", "kafka", "session"],
+        "impact": "Payment processing latency increased 3x during rebalance events.",
+        "opened_at": datetime(2026, 5, 24, 8, 0, 0, tzinfo=timezone.utc),
+        "status": "Open",
+    },
+    {
+        "case_id": "CASE-10021",
+        "customer": "CloudBase Corp",
+        "severity": "Medium",
+        "title": "Firefox WebGL context lost on GPU-intensive dashboards",
+        "related_bug_keywords": ["WebGL", "context", "GPU", "firefox", "graphics"],
+        "impact": "Analytics dashboards crash on Firefox. 200 users affected.",
+        "opened_at": datetime(2026, 5, 22, 16, 0, 0, tzinfo=timezone.utc),
+        "status": "In Progress",
     },
 ]
 
@@ -215,6 +299,37 @@ async def init():
             )
             await db.execute(stmt)
             print(f"  + {sla_data['tier_name']}")
+        await db.commit()
+
+        print("\nSeeding demo users...")
+        from passlib.context import CryptContext
+        pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        user_count_result = await db.execute(select(UserRole))
+        existing_users = list(user_count_result.scalars().all())
+        if not existing_users:
+            for u in DEMO_USERS:
+                user = UserRole(
+                    user_id=u["email"],
+                    role=u["role"],
+                    password_hash=pwd_ctx.hash(u["password"]),
+                    display_name=u["display_name"],
+                )
+                db.add(user)
+                print(f"  + {u['email']} ({u['role']})")
+            await db.commit()
+        else:
+            print(f"  ~ {len(existing_users)} users already exist, skipping seed")
+
+        print("\nSeeding customer cases...")
+        for case_data in MOCK_CUSTOMER_CASES:
+            existing = await db.execute(
+                select(CustomerCase).where(CustomerCase.case_id == case_data["case_id"])
+            )
+            if existing.scalar_one_or_none() is None:
+                db.add(CustomerCase(**case_data))
+                print(f"  + {case_data['case_id']} — {case_data['customer']}")
+            else:
+                print(f"  ~ {case_data['case_id']} (already exists)")
         await db.commit()
 
     print("\nDatabase initialization complete.")

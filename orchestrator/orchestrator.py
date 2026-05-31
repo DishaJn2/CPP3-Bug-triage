@@ -16,6 +16,11 @@ log = structlog.get_logger()
 
 class TaskOrchestrator:
     async def run(self, case_id: str, bug_id: str, source_id: str, engineer_id: str) -> None:
+        # Give the frontend 1.5 s to open WebSocket and subscribe before we start
+        # publishing panels. This prevents the race condition where Panel 1 is
+        # published before anyone is listening.
+        await asyncio.sleep(1.5)
+
         start_time = time.monotonic()
         context = {
             "case_id": case_id,
@@ -42,14 +47,14 @@ class TaskOrchestrator:
             context, _ = await ContextFetchAgent().safe_run(context)
             await self._checkpoint(case_id, "context_fetch", context)
             await self._publish_panel(case_id, "bug_context", {
-                "ticket": context.get("primary_ticket"),
-                "keywords": context.get("keywords"),
-                "components": context.get("components"),
-                "errors": context.get("errors"),
+                "primary_ticket": context.get("primary_ticket"),
+                "keywords": context.get("keywords") or [],
+                "components": context.get("components") or [],
+                "customer_cases": context.get("customer_cases") or [],
+                "errors": context.get("errors") or {},
             })
 
         if "cross_system_fetch" in steps_to_run or "enrichment" in steps_to_run:
-            tasks = []
             run_cross = "cross_system_fetch" in steps_to_run
             run_enrich = "enrichment" in steps_to_run
 
@@ -72,20 +77,21 @@ class TaskOrchestrator:
 
             await self._checkpoint(case_id, "enrichment", context)
             await self._publish_panel(case_id, "related_issues", {
-                "related_tickets": context.get("related_tickets", []),
-                "sources_queried": context.get("sources_queried", []),
+                "related_tickets": context.get("related_tickets") or [],
+                "sources_queried": context.get("sources_queried") or [],
             })
             await self._publish_panel(case_id, "linked_context", {
-                "kb_articles": context.get("kb_articles", []),
-                "customer_cases": context.get("customer_cases", []),
+                "kb_articles": context.get("kb_articles") or [],
+                "kb_reasoning": context.get("kb_reasoning") or "",
+                "customer_cases": context.get("customer_cases") or [],
             })
 
         if "ai_synthesis" in steps_to_run:
             context, _ = await AISynthesisAgent().safe_run(context)
             await self._checkpoint(case_id, "ai_synthesis", context)
             await self._publish_panel(case_id, "ai_summary", {
-                "synthesis": context.get("synthesis"),
-                "errors": context.get("errors"),
+                "synthesis": context.get("synthesis") or {},
+                "errors": context.get("errors") or {},
             })
 
         total_ms = int((time.monotonic() - start_time) * 1000)
@@ -113,7 +119,7 @@ class TaskOrchestrator:
                     "updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
                     "status": (context.get("primary_ticket") or {}).get("status", ""),
                 },
-                "systems_queried": context.get("sources_queried", []),
+                "systems_queried": context.get("sources_queried") or [],
                 "duration_ms": total_ms,
             })
             await delete_pipeline_context(db, case_id)

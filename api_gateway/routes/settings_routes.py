@@ -13,10 +13,11 @@ from orchestrator.connectors.registry import ConnectorRegistry, SYSTEM_TYPE_TO_C
 router = APIRouter(tags=["settings"])
 
 SYSTEM_TYPE_LABELS = {
-    "github":      {"label": "GitHub",      "icon": "GH", "color": "purple"},
-    "jira_apache": {"label": "Apache JIRA", "icon": "J",  "color": "blue"},
-    "bugzilla":    {"label": "Bugzilla",    "icon": "BZ", "color": "amber"},
-    "confluence":  {"label": "Confluence",  "icon": "CF", "color": "teal"},
+    "github":          {"label": "GitHub",           "icon": "GH",   "color": "purple"},
+    "jira_apache":     {"label": "Apache JIRA",      "icon": "J",    "color": "blue"},
+    "bugzilla":        {"label": "Bugzilla",         "icon": "BZ",   "color": "amber"},
+    "confluence":      {"label": "Confluence",       "icon": "CF",   "color": "teal"},
+    "customer_portal": {"label": "Customer Portal",  "icon": "CP",   "color": "green"},
 }
 
 

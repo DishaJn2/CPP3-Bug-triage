@@ -1,7 +1,7 @@
 import client from './client'
 
-export const startTriage = (bugId) =>
-  client.post('/triage', { bug_id: bugId }).then(r => r.data)
+export const startTriage = (bugId, sourceId = "") =>
+  client.post('/triage', { bug_id: bugId, source_id: sourceId }).then(r => r.data)
 
 export const openTriageStream = (caseId, onPanel, onComplete, onError) => {
   const token = localStorage.getItem('hpe_token') || ''
@@ -46,7 +46,7 @@ export const openTriageStream = (caseId, onPanel, onComplete, onError) => {
     ws.onclose = (e) => {
       console.log(`[WS] Closed: code=${e.code} panels=${panelsReceived}`)
       if (closed) return
-      if (panelsReceived === 4) return
+      if (panelsReceived >= 4) return
 
       if (reconnectAttempts < MAX_RECONNECTS) {
         reconnectAttempts++

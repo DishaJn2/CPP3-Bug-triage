@@ -60,9 +60,38 @@ async def publish_panel_update(case_id: str, panel_name: str, data: dict) -> Non
     try:
         r = await get_redis()
         message = json.dumps({"panel": panel_name, "data": data})
+
+        # Store as persistent key so late-connecting WebSocket can replay
+        panel_key = f"panel:{case_id}:{panel_name}"
+        await r.setex(panel_key, 3600, message)
+
+        # Ordered list of panels received so far
+        panels_key = f"panels:{case_id}"
+        await r.rpush(panels_key, panel_name)
+        await r.expire(panels_key, 3600)
+
+        # Publish for live listeners
         await r.publish(f"ws:{case_id}", message)
+
+        log.info("Panel published", case_id=case_id, panel=panel_name)
     except Exception as e:
         log.warning("publish_panel_update failed", error=str(e))
+
+
+async def get_stored_panels(case_id: str) -> list[dict]:
+    """Get all panels already published for this case (for late WebSocket connections)."""
+    try:
+        r = await get_redis()
+        panel_names = await r.lrange(f"panels:{case_id}", 0, -1)
+        panels = []
+        for name in panel_names:
+            key = f"panel:{case_id}:{name}"
+            val = await r.get(key)
+            if val:
+                panels.append(json.loads(val))
+        return panels
+    except Exception:
+        return []
 
 
 async def cache_case_result(case_id: str, data: dict, ttl: int = 3600) -> None:

@@ -14,3 +14,12 @@ export const removeConnection = (sourceId) =>
 
 export const testConnection = (sourceId) =>
   client.post(`/settings/connections/${sourceId}/test`).then((r) => r.data)
+
+export const listUsers = () =>
+  client.get('/auth/users').then((r) => r.data)
+
+export const createUser = (data) =>
+  client.post('/auth/users', data).then((r) => r.data)
+
+export const deleteUser = (email) =>
+  client.delete(`/auth/users/${encodeURIComponent(email)}`).then((r) => r.data)

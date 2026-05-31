@@ -28,6 +28,19 @@ JIRA_PRIORITY_MAP = {
 
 
 class JiraConnector(BaseConnector):
+    def _extract_text_from_adf(self, content) -> str:
+        """Recursively extract plain text from Atlassian Document Format (ADF)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            if content.get("type") == "text":
+                return content.get("text", "")
+            parts = [self._extract_text_from_adf(child) for child in content.get("content", [])]
+            return " ".join(filter(None, parts))
+        if isinstance(content, list):
+            return " ".join(self._extract_text_from_adf(item) for item in content)
+        return ""
+
     def _headers(self) -> dict:
         h = {"Accept": "application/json"}
         if self.token:
@@ -72,14 +85,20 @@ class JiraConnector(BaseConnector):
                     "title": (target.get("fields") or {}).get("summary", ""),
                 })
 
-        description = fields.get("description") or ""
-        if isinstance(description, dict):
-            description = str(description)
+        raw_description = fields.get("description") or ""
+        if isinstance(raw_description, dict):
+            # Atlassian Document Format (Jira Cloud v3)
+            description = self._extract_text_from_adf(raw_description)
+        elif isinstance(raw_description, str):
+            description = raw_description
+        else:
+            description = str(raw_description) if raw_description else ""
+        description = description[:2000]
 
         return TicketData(
             ticket_id=raw.get("key", ""),
             title=(fields.get("summary") or ""),
-            description=str(description)[:2000],
+            description=description,
             severity=severity,
             status=status,
             component=component,

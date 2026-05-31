@@ -1,11 +1,14 @@
 import asyncio
 import dataclasses
 import time
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc
 from ..auth import get_current_user, User
 from orchestrator.connectors.registry import ConnectorRegistry
 from orchestrator.redis_client import get_cached_buglist, cache_buglist
 from orchestrator.db.session import AsyncSessionLocal
+from orchestrator.db.models import AuditLog
 from orchestrator.db.repositories.audit_log import (
     get_last_triage_for_bug, get_metrics_summary, list_recent_pipeline_completions,
 )
@@ -13,15 +16,17 @@ from orchestrator.db.repositories.audit_log import (
 router = APIRouter(tags=["cases"])
 
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "Unknown": 4}
+_BUG_SOURCE_TYPES = {"github", "jira_apache", "bugzilla"}
 
 
 async def background_full_fetch(connector_list: list) -> None:
-    """Fetch more pages per connector and warm Redis after the fast response is sent."""
     for connector in connector_list:
+        if connector.system_type not in _BUG_SOURCE_TYPES:
+            continue
         try:
             existing = await get_cached_buglist(connector.source_id, "open", "")
             if existing and len(existing) > 50:
-                continue  # already well-populated
+                continue
 
             all_tickets = []
             if connector.system_type == "github":
@@ -108,13 +113,15 @@ async def get_bugs(
     status: str = Query(""),
     user: User = Depends(get_current_user),
 ):
-    connectors = await ConnectorRegistry.get_all_enabled()
+    all_connectors = await ConnectorRegistry.get_all_enabled()
+    # Only fetch bugs from real bug-tracking systems
+    connectors = [c for c in all_connectors if c.system_type in _BUG_SOURCE_TYPES]
 
     if not connectors:
         return {
             "bugs": [], "total": 0, "page": page,
             "page_size": page_size, "sources_online": 0,
-            "sources_total": 0, "partial": False,
+            "sources_total": len(connectors), "partial": False,
             "message": "No connectors configured",
         }
 
@@ -126,7 +133,7 @@ async def get_bugs(
 
             tickets = []
             if connector.system_type == "github":
-                for pg in range(1, 3):  # 2 pages × 100 = 200 bugs on cold cache
+                for pg in range(1, 3):
                     batch = await asyncio.wait_for(
                         connector.search("", max_results=100, page=pg),
                         timeout=15.0,
@@ -137,7 +144,7 @@ async def get_bugs(
                     if len(batch) < 100:
                         break
             elif connector.system_type == "jira_apache":
-                for start_at in range(0, 100, 50):  # 2 pages × 50 = 100 bugs on cold cache
+                for start_at in range(0, 100, 50):
                     batch = await asyncio.wait_for(
                         connector.search("", max_results=50, start_at=start_at),
                         timeout=15.0,
@@ -148,7 +155,6 @@ async def get_bugs(
                     if len(batch) < 50:
                         break
             elif connector.system_type == "bugzilla":
-                # Single fetch of 500 on cold cache; background task fills the rest
                 tickets = list(await asyncio.wait_for(
                     connector.search("", max_results=500, offset=0),
                     timeout=20.0,
@@ -206,8 +212,47 @@ async def get_bugs(
     start_idx = (page - 1) * page_size
     page_bugs = all_bugs[start_idx: start_idx + page_size]
 
-    # Warm cache with more pages in the background after responding
-    asyncio.create_task(background_full_fetch(connectors))
+    # Batch-query triage status for current page
+    page_bug_ids = [b.get("ticket_id") for b in page_bugs if b.get("ticket_id")]
+    triage_map = {}
+    if page_bug_ids:
+        try:
+            from sqlalchemy import select as sa_select
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    sa_select(AuditLog)
+                    .where(
+                        AuditLog.bug_id.in_(page_bug_ids),
+                        AuditLog.step == "pipeline_complete",
+                    )
+                    .order_by(AuditLog.bug_id, desc(AuditLog.created_at))
+                )
+                all_entries = list(result.scalars().all())
+            seen: set = set()
+            for entry in all_entries:
+                if entry.bug_id not in seen:
+                    seen.add(entry.bug_id)
+                    triage_map[entry.bug_id] = {
+                        "case_id": entry.case_id or "",
+                        "severity": (entry.summary or {}).get("severity") or (entry.summary or {}).get("unified_severity", ""),
+                        "confidence": (entry.summary or {}).get("confidence", 0),
+                        "triaged_at": entry.created_at.isoformat() if entry.created_at else "",
+                        "systems_queried": entry.systems_queried or [],
+                        "duration_ms": entry.duration_ms or 0,
+                    }
+        except Exception as e:
+            print(f"[BugList] triage_map query failed: {e}", flush=True)
+
+    for bug in page_bugs:
+        bug_id = bug.get("ticket_id", "")
+        if bug_id in triage_map:
+            bug["triage_info"] = triage_map[bug_id]
+            bug["is_triaged"] = True
+        else:
+            bug["triage_info"] = None
+            bug["is_triaged"] = False
+
+    asyncio.create_task(background_full_fetch(all_connectors))
 
     return {
         "bugs": page_bugs,
@@ -262,11 +307,11 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
 
     changes = []
     needs_retriage = False
+    connector = None
 
     try:
         connectors = await ConnectorRegistry.get_all_enabled()
         source_id = last_triage.source_id or ""
-        connector = None
 
         if source_id:
             for c in connectors:
@@ -276,7 +321,7 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
 
         if not connector:
             for c in connectors:
-                if bug_id.upper().startswith(c.ticket_prefix.upper()):
+                if c.system_type in _BUG_SOURCE_TYPES and bug_id.upper().startswith(c.ticket_prefix.upper()):
                     connector = c
                     break
 
@@ -299,6 +344,21 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
     except Exception:
         changes.append("Could not fetch current state from external system")
 
+    # Enrich with changelog events when changes detected
+    if needs_retriage and connector:
+        try:
+            since_str = last_triage.created_at.isoformat() if last_triage.created_at else ""
+            changelog = await asyncio.wait_for(
+                connector.get_changelog(bug_id, since=since_str),
+                timeout=8.0,
+            )
+            for event in changelog[:5]:
+                desc_str = f"{event.field}: {event.old_value} → {event.new_value}" if event.old_value or event.new_value else event.field
+                if desc_str and desc_str not in changes:
+                    changes.append(desc_str)
+        except Exception:
+            pass
+
     return {
         "is_new": False,
         "needs_retriage": needs_retriage,
@@ -316,18 +376,19 @@ async def get_metrics(user: User = Depends(get_current_user)):
         summary = await get_metrics_summary(db)
         recent = await list_recent_pipeline_completions(db, limit=10)
 
-    connectors = await ConnectorRegistry.get_all_enabled()
+    all_connectors = await ConnectorRegistry.get_all_enabled()
+    bug_connectors = [c for c in all_connectors if c.system_type in _BUG_SOURCE_TYPES]
 
-    severity_counts: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "Unknown": 0}
+    by_severity: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0, "P3": 0, "Unknown": 0}
     source_counts: dict[str, int] = {}
     total_confidence = 0.0
     confidence_count = 0
 
     for entry in recent:
         s = (entry.summary or {}).get("unified_severity") or (entry.summary or {}).get("severity", "Unknown")
-        if s not in severity_counts:
+        if s not in by_severity:
             s = "Unknown"
-        severity_counts[s] += 1
+        by_severity[s] += 1
         src = entry.source_id or "unknown"
         source_counts[src] = source_counts.get(src, 0) + 1
         conf = (entry.summary or {}).get("confidence", 0)
@@ -337,14 +398,47 @@ async def get_metrics(user: User = Depends(get_current_user)):
 
     avg_confidence = round(total_confidence / confidence_count, 2) if confidence_count else 0
 
+    # Live P0/P1 counts from Redis-cached bug data
+    live_p0 = 0
+    live_p1 = 0
+    live_total = 0
+    try:
+        for connector in bug_connectors:
+            cached = await get_cached_buglist(connector.source_id, "open", "")
+            if cached:
+                for bug in cached:
+                    live_total += 1
+                    sev = bug.get("severity", "Unknown")
+                    if sev == "P0":
+                        live_p0 += 1
+                    elif sev == "P1":
+                        live_p1 += 1
+    except Exception:
+        pass
+
+    # Triaged today count
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    triaged_today = sum(
+        1 for e in recent
+        if e.created_at and e.created_at >= today_start
+    )
+
+    total_triages = summary.get("total_triaged", 0)
+    needs_triage = max(0, live_total - total_triages)
+
     return {
-        "total_triages": summary["total_triaged"],
-        "total_triaged": summary["total_triaged"],
-        "sources_online": len(connectors),
-        "sources_total": len(connectors),
-        "by_severity": severity_counts,
+        "total_triages": total_triages,
+        "total_triaged": total_triages,
+        "sources_online": len(bug_connectors),
+        "sources_total": len(bug_connectors),
+        "by_severity": by_severity,
         "by_source": source_counts,
         "avg_confidence": avg_confidence,
+        "live_p0_count": live_p0,
+        "live_p1_count": live_p1,
+        "live_total_bugs": live_total,
+        "triaged_today": triaged_today,
+        "needs_triage": needs_triage,
         "recent_activity": [
             {
                 "case_id":     e.case_id or "",

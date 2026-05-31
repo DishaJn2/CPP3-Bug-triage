@@ -1,6 +1,6 @@
 import asyncio
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, Request
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from ..auth import get_current_user, User
@@ -10,12 +10,16 @@ from ..websocket_manager import manager
 from orchestrator.db.session import AsyncSessionLocal
 from orchestrator.db.repositories.source_registry import get_enabled_sources
 from orchestrator.redis_client import get_cached_case_result
+import structlog
+
+log = structlog.get_logger()
 
 router = APIRouter(tags=["triage"])
 
 
 class TriageRequest(BaseModel):
     bug_id: str
+    source_id: str = ""  # Optional — if provided, skips server-side detection
 
 
 @router.post("/triage")
@@ -28,24 +32,38 @@ async def start_triage(
     if not bug_id:
         raise HTTPException(status_code=400, detail="bug_id is required")
 
-    source_id = None
+    source_id = body.source_id.strip() if body.source_id else ""
+
     async with AsyncSessionLocal() as db:
         sources = await get_enabled_sources(db)
+
+    if source_id:
+        # Validate that provided source_id exists
+        valid_ids = {s.source_id for s in sources}
+        if source_id not in valid_ids:
+            source_id = ""  # fall through to detection
+
+    if not source_id:
+        # Server-side source detection: prefix match first
         for src in sources:
             prefix = (src.ticket_prefix or "").upper()
-            if prefix and bug_id.upper().startswith(prefix):
+            if prefix and bug_id.upper().startswith(prefix + "-"):
                 source_id = src.source_id
                 break
-        if not source_id and sources:
+        # For numeric IDs without prefix, use first GitHub connector
+        if not source_id:
             for src in sources:
                 if src.system_type == "github" and bug_id.isdigit():
                     source_id = src.source_id
                     break
+        # Last resort: first enabled source
         if not source_id and sources:
             source_id = sources[0].source_id
 
     if not source_id:
-        raise HTTPException(status_code=400, detail="Could not determine source for bug_id")
+        raise HTTPException(status_code=400, detail="No source system configured")
+
+    log.info("Starting triage", bug_id=bug_id, source_id=source_id, user=user.user_id)
 
     case_id = str(uuid4())
     producer = getattr(request.app.state, "kafka_producer", None)
@@ -66,67 +84,44 @@ async def start_triage(
 async def get_triage_result(case_id: str, user: User = Depends(get_current_user)):
     cached = await get_cached_case_result(case_id)
     if not cached:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Result not found or expired")
     return cached
 
 
 @router.websocket("/triage/{case_id}/stream")
-async def triage_stream(case_id: str, websocket: WebSocket, token: str = Query("")):
-    # MUST accept first before any close calls
+async def triage_stream(
+    case_id: str, websocket: WebSocket, token: str = Query("")
+):
+    # MUST accept first — cannot close without accepting
     await websocket.accept()
 
     if not token:
-        await websocket.send_json({"type": "error", "message": "No token"})
+        await websocket.send_json({"type": "error", "message": "No token provided"})
         await websocket.close(code=4001)
         return
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if not payload.get("sub"):
-            await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        user_email = payload.get("sub", "")
+        if not user_email:
+            await websocket.send_json({"type": "error", "message": "Invalid token"})
             await websocket.close(code=4001)
             return
     except JWTError:
-        await websocket.send_json({"type": "error", "message": "Invalid token"})
+        await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
         await websocket.close(code=4001)
         return
 
-    # Check if already completed (cached result)
-    cached = await get_cached_case_result(case_id)
-    if cached:
-        ctx = cached.get("context", {})
-        await websocket.send_json({"panel": "bug_context", "data": {
-            "ticket": ctx.get("primary_ticket"),
-            "keywords": ctx.get("keywords"),
-            "components": ctx.get("components"),
-        }})
-        await websocket.send_json({"panel": "related_issues", "data": {
-            "related_tickets": ctx.get("related_tickets", []),
-            "sources_queried": ctx.get("sources_queried", []),
-        }})
-        await websocket.send_json({"panel": "linked_context", "data": {
-            "kb_articles": ctx.get("kb_articles", []),
-            "customer_cases": ctx.get("customer_cases", []),
-        }})
-        await websocket.send_json({"panel": "ai_summary", "data": {
-            "synthesis": ctx.get("synthesis"),
-        }})
-        synthesis = ctx.get("synthesis") or {}
-        await websocket.send_json({
-            "type": "pipeline_complete",
-            "case_id": case_id,
-            "severity": synthesis.get("unified_severity"),
-            "confidence": synthesis.get("confidence"),
-        })
-        await websocket.close()
-        return
-
-    # Live pipeline — subscribe to Redis and forward
+    # Register connection (accept already called above)
     manager.active_connections[case_id] = websocket
+
     try:
+        # subscribe_and_forward handles both live pipelines and completed ones
+        # (replays stored panels for race-condition fix, sends pipeline_complete if done)
         await manager.subscribe_and_forward(case_id, websocket)
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        log.warning("WebSocket error", case_id=case_id, error=str(e))
     finally:
         manager.disconnect(case_id)

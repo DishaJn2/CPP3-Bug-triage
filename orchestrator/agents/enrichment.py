@@ -76,6 +76,37 @@ class EnrichmentAgent(BaseAgent):
             except Exception as e:
                 react_trace.append(f"Error: {str(e)[:50]}")
 
+        # Round 4: also query ConfluenceConnector for real Confluence pages
+        try:
+            import asyncio
+            from orchestrator.connectors.registry import ConnectorRegistry
+            conf_connector = await ConnectorRegistry.get_by_type("confluence")
+            if conf_connector and keywords:
+                conf_query = " ".join(keywords[:3])
+                conf_results = await asyncio.wait_for(
+                    conf_connector.search(conf_query, max_results=3),
+                    timeout=8.0,
+                )
+                react_trace.append(f"Thought: Query Confluence for: '{conf_query}'")
+                react_trace.append(f"Observation: Found {len(conf_results)} Confluence pages")
+                for ticket in conf_results:
+                    if ticket.ticket_id not in all_articles:
+                        kw_hits = sum(1 for k in keywords[:8] if k.lower() in ticket.title.lower())
+                        all_articles[ticket.ticket_id] = {
+                            "title": ticket.title,
+                            "url": ticket.url or "#",
+                            "excerpt": (ticket.description or "")[:200],
+                            "relevance": "High" if any(k.lower() in ticket.title.lower() for k in keywords[:3]) else "Medium",
+                            "space": "Confluence",
+                            "component": ticket.component or "",
+                            "last_modified": "",
+                            "keyword_hits": kw_hits,
+                            "is_answered": True,
+                            "score": max(kw_hits, 1),
+                        }
+        except Exception:
+            pass
+
         kb_articles = list(all_articles.values())
         print(f"[Enrichment] Found {len(kb_articles)} unique KB articles", flush=True)
 

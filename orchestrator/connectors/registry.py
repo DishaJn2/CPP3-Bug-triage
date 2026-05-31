@@ -1,16 +1,21 @@
+import asyncio
 import os
 import structlog
 from .github_connector import GithubConnector
 from .jira_connector import JiraConnector
 from .bugzilla_connector import BugzillaConnector
+from .confluence_connector import ConfluenceConnector
+from .customer_portal_connector import CustomerPortalConnector
 from .base_connector import BaseConnector
 
 log = structlog.get_logger()
 
 SYSTEM_TYPE_TO_CLASS = {
-    "github": GithubConnector,
-    "jira_apache": JiraConnector,
-    "bugzilla": BugzillaConnector,
+    "github":          GithubConnector,
+    "jira_apache":     JiraConnector,
+    "bugzilla":        BugzillaConnector,
+    "confluence":      ConfluenceConnector,
+    "customer_portal": CustomerPortalConnector,
 }
 
 _connector_cache: list[BaseConnector] = []
@@ -48,15 +53,27 @@ async def load_connectors_from_db() -> list[BaseConnector]:
         return connectors
     except Exception as e:
         log.warning("Failed to load connectors from DB", error=str(e))
-        return _connector_cache  # return whatever we have
+        return _connector_cache
 
 
 class ConnectorRegistry:
     @classmethod
     async def get_all_enabled(cls) -> list[BaseConnector]:
-        global _cache_loaded
+        global _connector_cache, _cache_loaded
+
+        # Reload if not loaded OR if previous load returned empty (e.g. DB wasn't ready)
         if not _cache_loaded or len(_connector_cache) == 0:
-            await load_connectors_from_db()
+            loaded = await load_connectors_from_db()
+            if loaded:
+                _connector_cache = loaded
+                _cache_loaded = True
+            elif not _cache_loaded:
+                # First attempt failed — retry once after a brief pause
+                await asyncio.sleep(0.5)
+                loaded = await load_connectors_from_db()
+                _connector_cache = loaded
+                _cache_loaded = bool(loaded)
+
         return _connector_cache
 
     @classmethod

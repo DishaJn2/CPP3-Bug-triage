@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getBugs, getBugStatus, refreshBugCache } from '../api/bugs'
+import { getBugs, getBugStatus, refreshBugCache, getMetrics } from '../api/bugs'
 import { startTriage } from '../api/triage'
 
-const SRC_CLS = { github: 'sb-gh', jira_apache: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf' }
-const SRC_LBL = { github: 'GH', jira_apache: 'JIRA', bugzilla: 'BZ', confluence: 'CF' }
+const SRC_CLS = { github: 'sb-gh', jira_apache: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf', customer_portal: 'sb-jira' }
+const SRC_LBL = { github: 'GH', jira_apache: 'JIRA', bugzilla: 'BZ', confluence: 'CF', customer_portal: 'CP' }
 const SEV_CLS = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
 const SEVERITY_ORDER = ['P0', 'P1', 'P2', 'P3', 'Unknown']
-const ALL_SOURCES = ['All Sources', 'github', 'jira_apache', 'bugzilla', 'confluence']
+const ALL_SOURCES = ['All Sources', 'github', 'jira_apache', 'bugzilla']
 
 function SevBadge({ sev }) {
   return <span className={`sev ${SEV_CLS[sev] || 'sev-unk'}`}>{sev || 'UNK'}</span>
@@ -24,7 +24,7 @@ function fmtDate(iso) {
   } catch { return '—' }
 }
 
-/* ─── Expanded status panel (SD7 / SD8 / SD9) ─── */
+/* ─── Status panel (SD7 / SD8 / SD9) shown when expanding an untriaged row ─── */
 function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) {
   if (loading) {
     return (
@@ -37,7 +37,6 @@ function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) 
       </div>
     )
   }
-
   if (!status) return null
 
   // SD9 — never triaged
@@ -48,18 +47,15 @@ function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) 
         padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 14,
       }}>
         <span style={{ fontSize: 13, color: 'var(--text3)' }}>Never triaged</span>
-        <button
-          className="btn btn-teal btn-sm"
-          onClick={() => onTriage(bugId)}
-          disabled={triaging === bugId}
-        >
+        <button className="btn btn-teal btn-sm" onClick={() => onTriage(bugId)} disabled={triaging === bugId}>
           {triaging === bugId ? '…' : '▶ Triage'}
         </button>
       </div>
     )
   }
+
   const lastDate = fmtDate(status.last_triaged_at)
-  const confPct = status.last_confidence ? Math.round(status.last_confidence * 100) : null
+  const confPct  = status.last_confidence ? Math.round(status.last_confidence * 100) : null
 
   // SD7 — changes found
   if (status.needs_retriage && status.changes?.length > 0) {
@@ -70,30 +66,23 @@ function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) 
           borderRadius: 7, padding: '9px 12px', marginBottom: 10, fontSize: 12, color: 'var(--orange)',
         }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ Changes detected since last triage:</div>
-          {status.changes.map((c, i) => (
-            <div key={i} style={{ marginLeft: 8 }}>• {c}</div>
-          ))}
+          {status.changes.map((c, i) => <div key={i} style={{ marginLeft: 8 }}>• {c}</div>)}
         </div>
         <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace', marginBottom: 10 }}>
           Last triaged: {lastDate}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {status.case_id && (
-            <button className="btn btn-outline btn-sm" onClick={() => onView(status.case_id)}>
-              View Previous Results
-            </button>
+            <button className="btn btn-outline btn-sm" onClick={() => onView(status.case_id)}>View Previous Results</button>
           )}
-          <button
-            className="btn btn-teal btn-sm"
-            onClick={() => onTriage(bugId)}
-            disabled={triaging === bugId}
-          >
+          <button className="btn btn-teal btn-sm" onClick={() => onTriage(bugId)} disabled={triaging === bugId}>
             {triaging === bugId ? '…' : '▶ Run Fresh Triage'}
           </button>
         </div>
       </div>
     )
   }
+
   // SD8 — no changes
   return (
     <div style={{ background: 'var(--bg)', borderTop: '1px solid var(--border)', padding: '12px 24px' }}>
@@ -105,22 +94,17 @@ function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) 
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
         {status.case_id && (
-          <button className="btn btn-outline btn-sm" onClick={() => onView(status.case_id)}>
-            View Previous Results
-          </button>
+          <button className="btn btn-outline btn-sm" onClick={() => onView(status.case_id)}>View Previous Results</button>
         )}
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => onTriage(bugId)}
-          disabled={triaging === bugId}
-        >
+        <button className="btn btn-ghost btn-sm" onClick={() => onTriage(bugId)} disabled={triaging === bugId}>
           {triaging === bugId ? '…' : 'Re-triage Anyway'}
         </button>
       </div>
     </div>
   )
 }
-/* ─── Expandable flat bug row (untriaged) ─── */
+
+/* ─── Expandable flat row for UNTRIAGED bugs ─── */
 function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
   const [expanded,      setExpanded]      = useState(false)
   const [status,        setStatus]        = useState(null)
@@ -150,13 +134,10 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
       borderRadius: 8, marginBottom: 5, overflow: 'hidden',
     }}>
       <div className="bug-flat" style={{ borderRadius: 0, border: 'none', marginBottom: 0 }}>
-        <button
-          onClick={handleExpand}
-          style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            fontSize: 10, color: 'var(--text3)', padding: '2px 4px', flexShrink: 0,
-          }}
-        >
+        <button onClick={handleExpand} style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          fontSize: 10, color: 'var(--text3)', padding: '2px 4px', flexShrink: 0,
+        }}>
           {expanded ? '▼' : '▶'}
         </button>
         <SrcBadge type={bug.system_type} />
@@ -169,7 +150,7 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
         </span>
         <button
           className="btn btn-teal btn-sm"
-          onClick={() => onTriage(bug.ticket_id)}
+          onClick={() => onTriage(bug)}
           disabled={triaging === bug.ticket_id}
         >
           {triaging === bug.ticket_id ? '…' : '▶ Triage'}
@@ -180,7 +161,7 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
           bugId={bug.ticket_id}
           status={status}
           loading={statusLoading}
-          onTriage={onTriage}
+          onTriage={() => onTriage(bug)}
           onView={handleView}
           triaging={triaging}
         />
@@ -189,54 +170,80 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
   )
 }
 
-function TriagedGroup({ group, onRetriage, retriaging }) {
+/* ─── Tree row for TRIAGED bugs — shows AI analysis as child ─── */
+function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   const [open, setOpen] = useState(false)
-  const hasChanged = group.children?.some((c) => c.changed)
+  const triage = bug.triage_info || {}
+  const confPct = triage.confidence ? Math.round(triage.confidence * 100) : null
+  const triagedAt = fmtDate(triage.triaged_at)
+  const caseIdShort = triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
+  const systems = triage.systems_queried || []
 
   return (
-    <div className={`tree-group ${hasChanged ? 'tree-group-changed' : 'tree-group-current'}`}>
-      <div className="tree-root" onClick={() => setOpen((v) => !v)}>
-        <span className={`expand-arrow ${open ? 'open' : ''}`}>▶</span>
-        <span className="bt-badge">{group.btId}</span>
-        {group.sources?.map((s) => <SrcBadge key={s} type={s} />)}
-        <span className="bug-flat-title">{group.title}</span>
-        <SevBadge sev={group.severity} />
-        <span className="bug-status-pill">{group.status}</span>
-        {hasChanged
-          ? <span className="changed-badge">⚠ Changed</span>
-          : <span className="current-badge">✓ Current</span>
-        }
-        <span className="bug-flat-time">{group.date}</span>
+    <div style={{
+      background: 'var(--white)', borderRadius: 8, marginBottom: 5, overflow: 'hidden',
+      border: '1px solid var(--border)', borderLeft: '4px solid var(--teal)',
+    }}>
+      {/* Root row */}
+      <div
+        className="bug-flat"
+        style={{ borderRadius: 0, border: 'none', marginBottom: 0, cursor: 'pointer' }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span style={{
+          fontSize: 10, color: 'var(--text3)', padding: '2px 4px', flexShrink: 0,
+          transform: open ? 'rotate(90deg)' : 'none', display: 'inline-block', transition: 'transform 0.15s',
+        }}>▶</span>
+        <span className="bt-badge">{caseIdShort}</span>
+        <SrcBadge type={bug.system_type} />
+        <span className="raw-id">{bug.ticket_id}</span>
+        <span className="bug-flat-title">{bug.title}</span>
+        <SevBadge sev={triage.severity || bug.severity} />
+        {confPct != null && (
+          <span className="match-badge match-h">{confPct}%</span>
+        )}
+        <span className="current-badge">✓ Current</span>
+        <span className="bug-flat-time">{triagedAt}</span>
         <button
           className="btn btn-outline btn-sm"
-          onClick={(e) => { e.stopPropagation(); onRetriage(group.rootId) }}
-          disabled={retriaging === group.rootId}
+          onClick={(e) => { e.stopPropagation(); onRetriage(bug) }}
+          disabled={retriaging === bug.ticket_id}
         >
-          {retriaging === group.rootId ? '…' : 'Re-triage'}
+          {retriaging === bug.ticket_id ? '…' : 'Re-triage'}
         </button>
       </div>
 
-      {open && group.children?.length > 0 && (
-        <div className="tree-children">
-          {group.children.map((child, i) => {
-            const score = child.similarity ?? 0
-            const matchCls = score >= 0.8 ? 'match-h' : score >= 0.6 ? 'match-m' : 'match-l'
-            const matchLbl = `${(score * 100).toFixed(0)}% match`
-            return (
-              <div key={i} className="tree-child">
-                <span className="tree-connector">└─</span>
-                <SrcBadge type={child.system_type} />
-                <span className="raw-id">{child.ticket_id}</span>
-                {score > 0 && <span className={`match-badge ${matchCls}`}>{matchLbl}</span>}
-                <span className="child-title">{child.title}</span>
-                <SevBadge sev={child.severity} />
-                <span className="bug-status-pill">{child.status}</span>
-                {child.url && (
-                  <a href={child.url} target="_blank" rel="noopener noreferrer" className="ext-btn">↗ Open</a>
+      {/* Expanded children — AI analysis */}
+      {open && (
+        <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg)' }}>
+          <div style={{
+            marginLeft: 24, paddingLeft: 16, paddingTop: 10, paddingBottom: 10,
+            borderLeft: '2px solid var(--border)', position: 'relative',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace' }}>└─</span>
+              <span style={{ fontSize: 12, color: 'var(--teal)', fontWeight: 700 }}>AI Analysis</span>
+              {triage.severity && <SevBadge sev={triage.severity} />}
+              {triage.case_id && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ fontSize: 11 }}
+                  onClick={(e) => { e.stopPropagation(); navigate(`/triage/${triage.case_id}?from=history`) }}
+                >
+                  View Results ↗
+                </button>
+              )}
+            </div>
+            {systems.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text3)', marginLeft: 24 }}>
+                <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>└─</span>
+                <span>Systems checked: <strong>{systems.join(', ')}</strong></span>
+                {confPct != null && (
+                  <span style={{ color: 'var(--teal)', marginLeft: 8 }}>Confidence: {confPct}%</span>
                 )}
               </div>
-            )
-          })}
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -244,30 +251,28 @@ function TriagedGroup({ group, onRetriage, retriaging }) {
 }
 
 export default function BugListPage() {
-  const [bugs,         setBugs]         = useState([])
-  const [total,        setTotal]        = useState(0)
-  const [page,         setPage]         = useState(1)
-  const [loading,      setLoading]      = useState(true)
-  const [searchInput,  setSearchInput]  = useState('')
-  const [search,       setSearch]       = useState('')
-  const [severity,     setSeverity]     = useState('')
-  const [source,       setSource]       = useState('')
-  const [activePill,   setActivePill]   = useState('All')
-  const [triagingId,   setTriagingId]   = useState(null)
-  const [lastSynced,   setLastSynced]   = useState(null)
-  const [directBugId,  setDirectBugId]  = useState('')
-  const [refreshing,   setRefreshing]   = useState(false)
+  const [bugs,          setBugs]          = useState([])
+  const [total,         setTotal]         = useState(0)
+  const [page,          setPage]          = useState(1)
+  const [loading,       setLoading]       = useState(true)
+  const [searchInput,   setSearchInput]   = useState('')
+  const [search,        setSearch]        = useState('')
+  const [severity,      setSeverity]      = useState('')
+  const [source,        setSource]        = useState('')
+  const [activePill,    setActivePill]    = useState('All')
+  const [triagingId,    setTriagingId]    = useState(null)
+  const [lastSynced,    setLastSynced]    = useState(null)
+  const [directBugId,   setDirectBugId]  = useState('')
+  const [refreshing,    setRefreshing]    = useState(false)
   const [sourcesOnline, setSourcesOnline] = useState(0)
-  const [isPartial,    setIsPartial]    = useState(false)
+  const [isPartial,     setIsPartial]     = useState(false)
+  const [metrics,       setMetrics]       = useState(null)
   const navigate    = useNavigate()
   const intervalRef = useRef(null)
 
-  // Debounce searchInput → search by 500 ms
+  // Debounce search
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setSearch(searchInput)
-      setPage(1)
-    }, 500)
+    const timer = setTimeout(() => { setSearch(searchInput); setPage(1) }, 500)
     return () => clearTimeout(timer)
   }, [searchInput])
 
@@ -293,10 +298,18 @@ export default function BugListPage() {
     return () => clearInterval(intervalRef.current)
   }, [fetchBugs])
 
-  const handleTriage = async (bugId) => {
+  // Fetch metrics for dashboard strip
+  useEffect(() => {
+    getMetrics().then(setMetrics).catch(console.error)
+  }, [])
+
+  const handleTriage = async (bugOrId) => {
+    // Accept either a full bug object { ticket_id, source_id } or a plain string (direct triage bar)
+    const bugId   = typeof bugOrId === 'string' ? bugOrId : bugOrId.ticket_id
+    const sourceId = typeof bugOrId === 'string' ? '' : (bugOrId.source_id || '')
     setTriagingId(bugId)
     try {
-      const data = await startTriage(bugId)
+      const data = await startTriage(bugId, sourceId)
       navigate(`/triage/${data.case_id}`)
     } catch (e) {
       alert('Failed to start triage: ' + (e.response?.data?.detail || e.message))
@@ -307,7 +320,7 @@ export default function BugListPage() {
 
   const handleRefresh = async () => {
     setRefreshing(true)
-    try { await refreshBugCache() } catch { /* ignore if endpoint errors */ }
+    try { await refreshBugCache() } catch { /* ignore */ }
     await new Promise((r) => setTimeout(r, 3000))
     await fetchBugs()
     setRefreshing(false)
@@ -315,46 +328,45 @@ export default function BugListPage() {
 
   const syncMinsAgo = lastSynced ? Math.round((Date.now() - lastSynced) / 60000) : null
 
-  const triaged  = bugs.filter((b) => b.group_id || b.case_id).length
-  const awaiting = bugs.length - triaged
-  const start    = (page - 1) * 50 + 1
-  const end      = Math.min((page - 1) * 50 + bugs.length, total)
-
   const visibleBugs = bugs.filter((b) => {
     if (activePill === 'All')       return true
-    if (activePill === 'Untriaged') return !b.group_id && !b.case_id
-    if (activePill === 'Changed')   return b.changed
+    if (activePill === 'Untriaged') return !b.is_triaged
+    if (activePill === 'Triaged')   return b.is_triaged
     if (activePill === 'Critical')  return b.severity === 'P0' || b.severity === 'P1'
     return true
   })
 
-  const groups = {}
-  const flatBugs = []
-  visibleBugs.forEach((bug) => {
-    const gId = bug.group_id || bug.case_id
-    if (gId) {
-      if (!groups[gId]) {
-        groups[gId] = {
-          btId:    `BT-${gId.slice(-5).toUpperCase()}`,
-          rootId:  bug.ticket_id,
-          title:   bug.title,
-          severity:bug.severity,
-          status:  bug.status,
-          sources: [],
-          date:    bug.updated_at ? new Date(bug.updated_at).toLocaleDateString() : '—',
-          children:[],
-        }
-      }
-      if (bug.system_type && !groups[gId].sources.includes(bug.system_type))
-        groups[gId].sources.push(bug.system_type)
-      groups[gId].children.push(bug)
-    } else {
-      flatBugs.push(bug)
-    }
-  })
+  const triaged  = bugs.filter((b) => b.is_triaged).length
+  const awaiting = bugs.length - triaged
+  const start    = (page - 1) * 50 + 1
+  const end      = Math.min((page - 1) * 50 + bugs.length, total)
+
+  const triagedBugs   = visibleBugs.filter((b) => b.is_triaged)
+  const untriagedBugs = visibleBugs.filter((b) => !b.is_triaged)
 
   return (
     <div>
+      {/* Dashboard strip */}
+      {metrics && (
+        <div style={{
+          display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap',
+          background: 'var(--bg)', border: '1px solid var(--border)',
+          borderRadius: 8, padding: '8px 14px', alignItems: 'center', fontSize: 12, fontWeight: 500,
+        }}>
+          <span style={{ color: 'var(--red)', fontWeight: 700 }}>🔴 P0: {metrics.live_p0_count ?? 0}</span>
+          <span style={{ color: 'var(--text3)' }}>·</span>
+          <span style={{ color: '#D97706', fontWeight: 700 }}>🟠 P1: {metrics.live_p1_count ?? 0}</span>
+          <span style={{ color: 'var(--text3)' }}>·</span>
+          <span style={{ color: 'var(--green)' }}>✅ Triaged Today: {metrics.triaged_today ?? 0}</span>
+          <span style={{ color: 'var(--text3)' }}>·</span>
+          <span style={{ color: '#D97706' }}>⏳ Needs Triage: {metrics.needs_triage ?? 0}</span>
+          <span style={{ color: 'var(--text3)' }}>·</span>
+          <span style={{ color: 'var(--teal)', fontWeight: 700 }}>
+            🟢 {metrics.sources_online ?? 0}/{metrics.sources_total ?? 0} Systems Online
+          </span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="page-hdr-row">
         <div className="page-hdr">
@@ -371,7 +383,6 @@ export default function BugListPage() {
             className="btn btn-ghost btn-sm"
             onClick={handleRefresh}
             disabled={refreshing || loading}
-            title="Clear cache and reload from external systems"
             style={{ fontFamily: 'inherit' }}
           >
             {refreshing ? 'Refreshing…' : '↺ Refresh'}
@@ -415,11 +426,11 @@ export default function BugListPage() {
         </select>
 
         <div className="filter-pills">
-          {['All', 'Untriaged', '⚠ Changed', 'Critical'].map((p) => (
+          {['All', 'Untriaged', 'Triaged', 'Critical'].map((p) => (
             <button
               key={p}
-              className={`pill${activePill === p || (p === '⚠ Changed' && activePill === 'Changed') ? ' active' : ''}`}
-              onClick={() => setActivePill(p === '⚠ Changed' ? 'Changed' : p)}
+              className={`pill${activePill === p ? ' active' : ''}`}
+              onClick={() => setActivePill(p)}
             >
               {p}
             </button>
@@ -453,20 +464,20 @@ export default function BugListPage() {
         <div className="legend-bar">
           <span className="legend-key">KEY:</span>
           <span className="bt-badge">BT-001</span>
-          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= tool group ID</span>
-          <span className="changed-badge">⚠ Changed</span>
-          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= updated since triage</span>
-          <span className="match-badge match-h">97% match</span>
-          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= AI similarity score</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= AI triage session</span>
+          <span className="current-badge">✓ Current</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= triaged, no changes</span>
+          <span className="match-badge match-h">90%</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= AI confidence</span>
           <span className="raw-id">DISK-779</span>
-          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= raw ID not yet triaged</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>= untriaged bug ID</span>
         </div>
       </div>
 
       {/* Stats line */}
       {!loading && (
         <div className="stats-line">
-          Showing {start}–{end} of {total} bugs · {triaged} triaged · {awaiting} awaiting · Sort: Severity
+          Showing {start}–{end} of {total} bugs · {triaged} triaged · {awaiting} untriaged · Sort: Severity
         </div>
       )}
 
@@ -477,9 +488,7 @@ export default function BugListPage() {
           background: 'var(--orange-lt)', border: '1px solid var(--orange-bd)',
           borderRadius: 7, padding: '8px 14px', fontSize: 12, color: 'var(--orange)',
         }}>
-          <span style={{ flex: 1 }}>
-            ⚠ Showing partial results — some sources are still loading ({sourcesOnline} of {sourcesOnline} responded)
-          </span>
+          <span style={{ flex: 1 }}>⚠ Showing partial results — some sources are still loading</span>
           <button className="btn btn-ghost btn-sm" onClick={handleRefresh} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
@@ -511,12 +520,7 @@ export default function BugListPage() {
                 <button
                   className="btn btn-ghost btn-sm"
                   onClick={() => {
-                    setSearchInput('')
-                    setSearch('')
-                    setSeverity('')
-                    setSource('')
-                    setActivePill('All')
-                    setPage(1)
+                    setSearchInput(''); setSearch(''); setSeverity(''); setSource(''); setActivePill('All'); setPage(1)
                   }}
                 >
                   Clear filters
@@ -529,11 +533,8 @@ export default function BugListPage() {
               <div style={{ fontSize: 14, color: 'var(--text2)', fontWeight: 600, marginBottom: 6 }}>
                 Loading bugs from external systems...
               </div>
-              <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 6 }}>
-                This may take 15–20 seconds on first load.
-              </div>
               <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 16 }}>
-                Bugs are cached for 5 minutes after first fetch.
+                This may take 15–20 seconds on first load. Bugs are cached for 5 minutes.
               </div>
               <button className="btn btn-teal btn-sm" onClick={fetchBugs} disabled={loading}>
                 {loading ? 'Loading…' : 'Retry'}
@@ -543,23 +544,24 @@ export default function BugListPage() {
         })()
       ) : (
         <div>
-          {/* Triaged groups first */}
-          {Object.values(groups).map((group) => (
-            <TriagedGroup
-              key={group.btId}
-              group={group}
-              onRetriage={handleTriage}
-              retriaging={triagingId}
-            />
-          ))}
-
-          {/* Expandable flat untriaged rows */}
-          {flatBugs.map((bug, idx) => (
+          {/* Untriaged bugs first — flat expandable rows */}
+          {untriagedBugs.map((bug, idx) => (
             <ExpandableBugRow
               key={`${bug.ticket_id}-${idx}`}
               bug={bug}
               onTriage={handleTriage}
               triaging={triagingId}
+              navigate={navigate}
+            />
+          ))}
+
+          {/* Triaged bugs — tree rows with AI analysis children */}
+          {triagedBugs.map((bug, idx) => (
+            <TriagedBugRow
+              key={`triaged-${bug.ticket_id}-${idx}`}
+              bug={bug}
+              onRetriage={(b) => handleTriage(b)}
+              retriaging={triagingId}
               navigate={navigate}
             />
           ))}

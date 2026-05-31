@@ -18,7 +18,6 @@ function SevBadge({ sev }) {
   return <span className={`sev ${SEV_CLS[sev] || 'sev-unk'}`}>{sev || 'UNK'}</span>
 }
 
-/* ─── TEAM TAG COLORS (cycle through palette) ─── */
 const TEAM_COLORS = [
   { bg: 'var(--blue-lt)',   color: 'var(--blue)',   bd: 'var(--blue-bd)'   },
   { bg: 'var(--purple-lt)', color: 'var(--purple)', bd: 'var(--purple-bd)' },
@@ -27,27 +26,23 @@ const TEAM_COLORS = [
   { bg: 'var(--orange-lt)', color: 'var(--orange)', bd: 'var(--orange-bd)' },
 ]
 
-/* ─── agent definitions ─── */
 const AGENTS = [
-  { id: 'cf', icon: 'CF', name: 'Context Fetch Agent',      desc: 'Fetching full ticket context + customer cases',       phase: 1 },
-  { id: 'cs', icon: 'CS', name: 'Cross-System Fetch Agent', desc: 'Searching related issues across all trackers',        phase: 2 },
-  { id: 'en', icon: 'EN', name: 'Enrichment Agent',         desc: 'Querying Confluence knowledge base',                  phase: 2 },
-  { id: 'ai', icon: 'AI', name: 'AI Synthesis Agent',       desc: 'Synthesising final triage output',                    phase: 3 },
+  { id: 'cf', icon: 'CF', name: 'Context Fetch Agent',      desc: 'Fetching full ticket context + customer cases',  phase: 1 },
+  { id: 'cs', icon: 'CS', name: 'Cross-System Fetch Agent', desc: 'Searching related issues across all trackers',   phase: 2 },
+  { id: 'en', icon: 'EN', name: 'Enrichment Agent',         desc: 'Querying Confluence knowledge base',             phase: 2 },
+  { id: 'ai', icon: 'AI', name: 'AI Synthesis Agent',       desc: 'Synthesising final triage output',               phase: 3 },
 ]
 
 function agentState(id, panels) {
   const { bug_context, related_issues, linked_context, ai_summary } = panels
-  if (id === 'cf') {
-    if (bug_context)  return 'done'
-    return 'running'
-  }
+  if (id === 'cf') return bug_context  ? 'done' : 'running'
   if (id === 'cs') {
-    if (!bug_context) return 'wait'
+    if (!bug_context)  return 'wait'
     if (related_issues) return 'done'
     return 'running'
   }
   if (id === 'en') {
-    if (!bug_context) return 'wait'
+    if (!bug_context)   return 'wait'
     if (linked_context) return 'done'
     return 'running'
   }
@@ -67,9 +62,9 @@ function agentStatusText(state) {
 
 function progress(panels) {
   const { bug_context, related_issues, linked_context, ai_summary } = panels
-  if (ai_summary)    return 100
+  if (ai_summary) return 100
   let p = 0
-  if (bug_context)   p += 25
+  if (bug_context)    p += 25
   if (related_issues) p += 25
   if (linked_context) p += 25
   return p
@@ -80,7 +75,6 @@ function progress(panels) {
 ═══════════════════════════════════ */
 function LoadingState({ caseId, panels, elapsed }) {
   const pct = progress(panels)
-
   return (
     <div className="triage-load-wrap">
       <div className="triage-load-card fade-in">
@@ -89,14 +83,10 @@ function LoadingState({ caseId, panels, elapsed }) {
           <span className="bt-badge" style={{ marginRight: 8 }}>{caseId}</span>
           read-only · nothing stored
         </p>
-
         {AGENTS.map((agent, i) => {
-          const state  = agentState(agent.id, panels)
+          const state     = agentState(agent.id, panels)
           const prevAgent = AGENTS[i - 1]
-          const showPhaseLabel =
-            i === 0 ||
-            agent.phase !== AGENTS[i - 1]?.phase
-
+          const showPhaseLabel = i === 0 || agent.phase !== prevAgent?.phase
           return (
             <div key={agent.id}>
               {showPhaseLabel && (
@@ -105,16 +95,13 @@ function LoadingState({ caseId, panels, elapsed }) {
                   {agent.phase === 1 ? 'SEQUENTIAL' : agent.phase === 2 ? 'PARALLEL' : 'SYNTHESIS'}
                 </div>
               )}
-              {/* Blue info box between phase 1 and phase 2 */}
               {agent.phase === 2 && prevAgent?.phase === 1 && (
                 <div className="parallel-info">
                   ℹ Cross-System Fetch and Enrichment run in parallel
                 </div>
               )}
               <div className="agent-row">
-                <div className={`agent-icon ${state}`}>
-                  {state === 'done' ? '✓' : agent.icon}
-                </div>
+                <div className={`agent-icon ${state}`}>{state === 'done' ? '✓' : agent.icon}</div>
                 <div className="agent-text">
                   <div className="agent-name">{agent.name}</div>
                   <div className="agent-desc">{agent.desc}</div>
@@ -124,7 +111,6 @@ function LoadingState({ caseId, panels, elapsed }) {
             </div>
           )
         })}
-
         <div className="progress-wrap">
           <div className="progress-bar">
             <div className="progress-fill" style={{ width: `${pct}%` }} />
@@ -140,18 +126,22 @@ function LoadingState({ caseId, panels, elapsed }) {
    RESULTS STATE
 ═══════════════════════════════════ */
 function ResultsState({ caseId, panels, elapsed, onBack }) {
-  const ctx        = panels.bug_context  || {}
-  const related    = panels.related_issues || {}
-  const linked     = panels.linked_context || {}
-  const aiPanel    = panels.ai_summary   || {}
-  const ticket     = ctx.ticket          || {}
-  const synthesis  = aiPanel.synthesis   || {}
+  const ctx      = panels.bug_context   || {}
+  const related  = panels.related_issues || {}
+  const linked   = panels.linked_context || {}
+  const aiPanel  = panels.ai_summary    || {}
+
+  // FIX 12: orchestrator now sends primary_ticket (was 'ticket')
+  const ticket   = ctx.primary_ticket   || {}
+  const synthesis = aiPanel.synthesis   || {}
 
   const conf       = (synthesis.confidence || 0) * 100
   const sevBlockCls = { P0: 'p0-b', P1: 'p1-b', P2: 'p2-b', P3: 'p3-b' }[synthesis.unified_severity] || 'p3-b'
 
-  const srcType  = ticket.system_type || ticket.source
+  const srcType   = ticket.system_type || ticket.source
   const caseShort = `BT-${caseId.slice(-5).toUpperCase()}`
+
+  const customerCases = ctx.customer_cases || linked.customer_cases || []
 
   return (
     <div className="fade-in">
@@ -162,9 +152,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
         <span className="mono" style={{ fontSize: 12, color: 'var(--blue)' }}>{ticket.ticket_id || caseId}</span>
         <h2>{ticket.title || 'Triage Result'}</h2>
         <div className="result-topbar-right">
-          <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace' }}>
-            {elapsed}s
-          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace' }}>{elapsed}s</span>
           {srcType && <SrcBadge type={srcType} />}
         </div>
       </div>
@@ -185,7 +173,12 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             {ticket.component && <div className="meta-row"><span className="meta-k">Component</span> <span className="meta-v">{ticket.component}</span></div>}
             {ticket.assignee  && <div className="meta-row"><span className="meta-k">Assignee</span>  <span className="meta-v">{ticket.assignee}</span></div>}
             {ticket.reporter  && <div className="meta-row"><span className="meta-k">Reporter</span>  <span className="meta-v">{ticket.reporter}</span></div>}
-            {ticket.created_at && <div className="meta-row"><span className="meta-k">Created</span>  <span className="meta-v mono" style={{ fontSize: 11 }}>{new Date(ticket.created_at).toLocaleDateString()}</span></div>}
+            {ticket.created_at && (
+              <div className="meta-row">
+                <span className="meta-k">Created</span>
+                <span className="meta-v mono" style={{ fontSize: 11 }}>{new Date(ticket.created_at).toLocaleDateString()}</span>
+              </div>
+            )}
 
             {ticket.description && (
               <>
@@ -197,11 +190,26 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
               </>
             )}
 
-            {ctx.customer_cases?.length > 0 && (
+            {customerCases.length > 0 && (
               <>
                 <div className="panel-div" />
-                {ctx.customer_cases.map((cc, i) => (
-                  <div key={i} className="cust-card">{cc.summary || cc.case_id || JSON.stringify(cc)}</div>
+                <div className="sec-label">RELATED CUSTOMER CASES</div>
+                {customerCases.map((cc, i) => (
+                  <div key={i} className="cust-card">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                      <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, fontWeight: 700, color: 'var(--teal)' }}>
+                        {cc.case_id}
+                      </span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: cc.severity === 'Critical' ? 'var(--red)' : cc.severity === 'High' ? '#D97706' : 'var(--text2)' }}>
+                        {cc.severity}
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.customer}</span>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{cc.title}</div>
+                    {cc.impact && (
+                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.impact.slice(0, 120)}</div>
+                    )}
+                  </div>
                 ))}
               </>
             )}
@@ -218,10 +226,9 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
               const count   = tickets.length
               if (!count) return <span className="panel-badge pb-blue">0 found</span>
               const allWeak = tickets.every((t) => (t.similarity_score || 0) < 0.35)
-              const badgeLabel = allWeak
-                ? `${count} weak match${count !== 1 ? 'es' : ''}`
-                : `${count} found`
-              return <span className="panel-badge pb-blue">{badgeLabel}</span>
+              return <span className="panel-badge pb-blue">
+                {allWeak ? `${count} weak match${count !== 1 ? 'es' : ''}` : `${count} found`}
+              </span>
             })()}
           </div>
           <div className="panel-body scroll">
@@ -231,16 +238,10 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
               const score = t.similarity_score || 0
               const pct   = (score * 100).toFixed(0)
               const label = t.similarity_label || ''
-
               const isWeak = score < 0.35 || label === 'Possible Match'
               const isGood = !isWeak && (label === 'Good Match' || label === 'Excellent Match')
-              // isFair = !isWeak && !isGood
-
-              const barColor    = isWeak ? 'var(--text3)' : isGood ? 'var(--teal)' : 'var(--orange)'
-              const reasonText  = isWeak
-                ? 'Weak semantic overlap — included for completeness'
-                : t.similarity_reason
-
+              const barColor = isWeak ? 'var(--text3)' : isGood ? 'var(--teal)' : 'var(--orange)'
+              const reasonText = isWeak ? 'Weak semantic overlap — included for completeness' : t.similarity_reason
               return (
                 <div key={i} className="issue-card">
                   <div className="issue-top">
@@ -257,9 +258,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                     <span className="sim-pct" style={{ color: barColor }}>{pct}% {label}</span>
                   </div>
                   {reasonText && (
-                    <p className="sim-reason" style={{ color: isWeak ? 'var(--text3)' : undefined }}>
-                      {reasonText}
-                    </p>
+                    <p className="sim-reason" style={{ color: isWeak ? 'var(--text3)' : undefined }}>{reasonText}</p>
                   )}
                   {isWeak && (
                     <p style={{ fontSize: 11, color: 'var(--text3)', fontStyle: 'italic', margin: '2px 0 0 0' }}>
@@ -272,11 +271,11 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
           </div>
         </div>
 
-        {/* ── Panel 3: Stack Overflow Discussions ── */}
+        {/* ── Panel 3: Knowledge Base / Confluence ── */}
         <div className="panel amber-t">
           <div className="panel-hdr">
             <div className="panel-num pn-amber">03</div>
-            <span className="panel-title">Stack Overflow Discussions</span>
+            <span className="panel-title">Knowledge Base</span>
             <span className="panel-badge pb-amber">{linked.kb_articles?.length || 0} results</span>
           </div>
           <div className="panel-body scroll">
@@ -289,7 +288,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
               </>
             )}
             {!linked.kb_articles?.length ? (
-              <p style={{ color: 'var(--text3)', fontSize: 13 }}>No Stack Overflow discussions found.</p>
+              <p style={{ color: 'var(--text3)', fontSize: 13 }}>No knowledge base articles found.</p>
             ) : linked.kb_articles.map((a, i) => {
               const scoreCls = a.score >= 5 ? 'so-score-high' : a.score >= 1 ? 'so-score-mid' : 'so-score-low'
               const relCls   = a.relevance === 'High' ? 'sev-p1' : a.relevance === 'Medium' ? 'sev-p2' : 'sev-p3'
@@ -303,6 +302,9 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                       </span>
                     )}
                     <span className={`sev ${relCls}`} style={{ fontSize: 10, padding: '1px 6px' }}>{a.relevance}</span>
+                    {a.space && (
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontStyle: 'italic' }}>{a.space}</span>
+                    )}
                   </div>
                   <a
                     href={a.url}
@@ -314,6 +316,11 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                   >
                     {a.title}
                   </a>
+                  {a.excerpt && (
+                    <p style={{ fontSize: 11.5, color: 'var(--text3)', margin: 0, lineHeight: 1.4 }}>
+                      {a.excerpt.slice(0, 160)}{a.excerpt.length > 160 ? '…' : ''}
+                    </p>
+                  )}
                   {a.tags?.length > 0 && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                       {a.tags.map((tag, ti) => (
@@ -334,9 +341,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
           <div className="panel-hdr">
             <div className="panel-num pn-purple">04</div>
             <span className="panel-title">AI Summary</span>
-            {conf > 0 && (
-              <span className="panel-badge pb-purple">{conf.toFixed(0)}% confidence</span>
-            )}
+            {conf > 0 && <span className="panel-badge pb-purple">{conf.toFixed(0)}% confidence</span>}
           </div>
           <div className="panel-body scroll">
             {synthesis.used_fallback && (
@@ -346,9 +351,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             {synthesis.unified_severity && (
               <div className={`sev-block ${sevBlockCls}`}>
                 <div className="sev-big">{synthesis.unified_severity}</div>
-                {synthesis.severity_rationale && (
-                  <div className="sev-reason">{synthesis.severity_rationale}</div>
-                )}
+                {synthesis.severity_rationale && <div className="sev-reason">{synthesis.severity_rationale}</div>}
               </div>
             )}
 
@@ -367,9 +370,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             {synthesis.root_cause && (
               <>
                 <div className="sec-label">Root Cause</div>
-                <div className="root-box">
-                  <p>{synthesis.root_cause}</p>
-                </div>
+                <div className="root-box"><p>{synthesis.root_cause}</p></div>
               </>
             )}
 
@@ -394,11 +395,8 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                   {synthesis.affected_teams.map((team, i) => {
                     const tc = TEAM_COLORS[i % TEAM_COLORS.length]
                     return (
-                      <span
-                        key={i}
-                        className="team-tag"
-                        style={{ background: tc.bg, color: tc.color, border: `1px solid ${tc.bd}` }}
-                      >
+                      <span key={i} className="team-tag"
+                        style={{ background: tc.bg, color: tc.color, border: `1px solid ${tc.bd}` }}>
                         {team}
                       </span>
                     )
@@ -439,34 +437,48 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
    MAIN TRIAGE PAGE
 ═══════════════════════════════════ */
 export default function TriagePage() {
-  const { caseId }       = useParams()
-  const navigate         = useNavigate()
-  const [searchParams]   = useSearchParams()
-  const fromHistory      = searchParams.get('from') === 'history'
-  const [panels,    setPanels]   = useState({})
-  const [complete,  setComplete] = useState(false)
-  const [elapsed,   setElapsed]  = useState(0)
-  const [error,     setError]    = useState(null)
-  const startTime   = useRef(Date.now())
-  const cleanupRef  = useRef(null)
-  const gotDataRef  = useRef(false)
+  const { caseId }     = useParams()
+  const navigate       = useNavigate()
+  const [searchParams] = useSearchParams()
+  const fromHistory    = searchParams.get('from') === 'history'
+  const [panels,   setPanels]   = useState({})
+  const [complete, setComplete] = useState(false)
+  const [elapsed,  setElapsed]  = useState(0)
+  const [error,    setError]    = useState(null)
+  const startTime  = useRef(Date.now())
+  const cleanupRef = useRef(null)
 
   useEffect(() => {
     const timer = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTime.current) / 1000))
     }, 1000)
 
-    // When opened from history, immediately load from cache
+    // When opened from history, reconstruct panels from cached context
     if (fromHistory) {
       getCaseResult(caseId)
         .then((cached) => {
           if (cached) {
-            const newPanels = {}
-            if (cached.bug_context)    newPanels.bug_context    = cached.bug_context
-            if (cached.related_issues) newPanels.related_issues = cached.related_issues
-            if (cached.linked_context) newPanels.linked_context = cached.linked_context
-            if (cached.ai_summary)     newPanels.ai_summary     = cached.ai_summary
-            setPanels(newPanels)
+            const ctx = cached.context || {}
+            setPanels({
+              bug_context: {
+                primary_ticket: ctx.primary_ticket || null,
+                keywords:       ctx.keywords       || [],
+                components:     ctx.components     || [],
+                customer_cases: ctx.customer_cases || [],
+              },
+              related_issues: {
+                related_tickets: ctx.related_tickets || [],
+                sources_queried: ctx.sources_queried || [],
+              },
+              linked_context: {
+                kb_articles:  ctx.kb_articles  || [],
+                kb_reasoning: ctx.kb_reasoning || '',
+                customer_cases: ctx.customer_cases || [],
+              },
+              ai_summary: {
+                synthesis: ctx.synthesis || {},
+              },
+            })
             setComplete(true)
             clearInterval(timer)
           } else {
@@ -478,14 +490,13 @@ export default function TriagePage() {
           setError('Result expired. Please re-triage.')
           clearInterval(timer)
         })
-
       return () => { clearInterval(timer) }
     }
 
+    // Live pipeline — open WebSocket and receive panels as they arrive
     cleanupRef.current = openTriageStream(
       caseId,
       (panelName, data) => {
-        gotDataRef.current = true
         setPanels((prev) => ({ ...prev, [panelName]: data }))
       },
       () => { setComplete(true); clearInterval(timer) },
@@ -513,18 +524,9 @@ export default function TriagePage() {
       )}
 
       {complete ? (
-        <ResultsState
-          caseId={caseId}
-          panels={panels}
-          elapsed={elapsed}
-          onBack={handleBack}
-        />
+        <ResultsState caseId={caseId} panels={panels} elapsed={elapsed} onBack={handleBack} />
       ) : (
-        <LoadingState
-          caseId={caseId}
-          panels={panels}
-          elapsed={elapsed}
-        />
+        <LoadingState caseId={caseId} panels={panels} elapsed={elapsed} />
       )}
     </div>
   )

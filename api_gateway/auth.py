@@ -10,43 +10,36 @@ from .config import JWT_SECRET, JWT_ALGORITHM, JWT_EXPIRE_MINUTES
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-_DEMO_PLAIN = {
-    "disha@hpe.com": {"password": "password123", "role": "engineer"},
-    "admin@hpe.com": {"password": "admin123", "role": "admin"},
-    "customer@acme.com": {"password": "customer123", "role": "customer"},
-}
-
-DEMO_USERS: dict = {}
-
-
-def _ensure_demo_users():
-    if not DEMO_USERS:
-        for email, data in _DEMO_PLAIN.items():
-            DEMO_USERS[email] = {
-                "password_hash": pwd_context.hash(data["password"]),
-                "role": data["role"],
-            }
-
 
 @dataclass
 class User:
     user_id: str
     email: str
     role: str
+    display_name: str = ""
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def authenticate_user(email: str, password: str) -> Optional[User]:
-    _ensure_demo_users()
-    user_data = DEMO_USERS.get(email)
-    if not user_data:
+async def authenticate_user(email: str, password: str) -> Optional[User]:
+    from orchestrator.db.session import AsyncSessionLocal
+    from orchestrator.db.repositories.user_roles import get_user_by_email
+
+    async with AsyncSessionLocal() as db:
+        user_record = await get_user_by_email(db, email)
+
+    if not user_record:
         return None
-    if not verify_password(password, user_data["password_hash"]):
+    if not pwd_context.verify(password, user_record.password_hash):
         return None
-    return User(user_id=email, email=email, role=user_data["role"])
+    return User(
+        user_id=user_record.user_id,
+        email=user_record.user_id,
+        role=user_record.role,
+        display_name=user_record.display_name or email.split("@")[0],
+    )
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -66,11 +59,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         email: str = payload.get("sub", "")
         role: str = payload.get("role", "")
+        display_name: str = payload.get("display_name", "")
         if not email:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    return User(user_id=email, email=email, role=role)
+    return User(user_id=email, email=email, role=role, display_name=display_name)
 
 
 def require_role(*roles: str):
@@ -78,4 +72,4 @@ def require_role(*roles: str):
         if user.role not in roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
         return user
-    return Depends(_check)
+    return _check
