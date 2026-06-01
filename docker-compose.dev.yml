@@ -43,3 +43,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+openbao:
+  image: quay.io/openbao/openbao:latest
+  ports:
+    - "8200:8200"
+  environment:
+    BAO_DEV_ROOT_TOKEN_ID: "hpe-dev-root-token"
+    BAO_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+  cap_add:
+    - IPC_LOCK
+  command: server -dev

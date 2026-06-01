@@ -74,6 +74,31 @@ async def background_full_fetch(connector_list: list) -> None:
             print(f"[BackgroundFetch] {connector.source_id} failed: {type(e).__name__}: {str(e)[:80]}", flush=True)
 
 
+@router.get("/debug/confluence-test")
+async def debug_confluence(q: str = "NormalizeCTEIds"):
+    import asyncio
+    from orchestrator.connectors.registry import ConnectorRegistry
+
+    connectors = await ConnectorRegistry.get_all_enabled()
+    conf = next((c for c in connectors if c.system_type == "confluence"), None)
+
+    if not conf:
+        return {"error": "No confluence connector found"}
+
+    try:
+        results = await asyncio.wait_for(conf.search(q, max_results=5), timeout=15.0)
+        return {
+            "connector": conf.source_id,
+            "base_url": conf.base_url,
+            "query": q,
+            "results_count": len(results),
+            "titles": [r.title for r in results],
+            "urls": [r.url for r in results],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/debug/sources")
 async def debug_sources():
     from orchestrator.db.session import AsyncSessionLocal
