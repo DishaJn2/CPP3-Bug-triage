@@ -127,7 +127,7 @@ class JiraConnector(BaseConnector):
         except Exception:
             return None
 
-    async def search(self, query: str, max_results: int = 50, start_at: int = 0) -> list[TicketData]:
+    async def search(self, query: str, max_results: int = 100, start_at: int = 0) -> list[TicketData]:
         if query:
             jql = f'project = {self.project_key} AND text ~ "{query}" ORDER BY updated DESC'
         else:

@@ -27,7 +27,6 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     depends_on: [zookeeper]
@@ -43,13 +42,3 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-openbao:
-  image: quay.io/openbao/openbao:latest
-  ports:
-    - "8200:8200"
-  environment:
-    BAO_DEV_ROOT_TOKEN_ID: "hpe-dev-root-token"
-    BAO_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-  cap_add:
-    - IPC_LOCK
-  command: server -dev

@@ -198,12 +198,10 @@ DEMO_SLA = [
 
 DEMO_USERS = [
     {"email": "disha@hpe.com",     "password": "password123", "role": "engineer",  "display_name": "Disha Jain"},
-    {"email": "anuj@hpe.com",      "password": "password123", "role": "engineer",  "display_name": "Anuj Modani"},
     {"email": "admin@hpe.com",     "password": "admin123",    "role": "admin",     "display_name": "Admin User"},
     {"email": "customer@acme.com", "password": "customer123", "role": "customer",  "display_name": "Acme Customer"},
     {"email": "exec@hpe.com",      "password": "exec123",     "role": "executive", "display_name": "HPE Executive"},
 ]
-
 MOCK_CUSTOMER_CASES = [
     {
         "case_id": "CASE-10041",

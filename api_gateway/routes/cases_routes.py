@@ -157,42 +157,53 @@ async def get_bugs(
                 return connector.source_id, cached, True
 
             tickets = []
-            if connector.system_type == "github":
-                for pg in range(1, 3):
-                    batch = await asyncio.wait_for(
-                        connector.search("", max_results=100, page=pg),
+            cls_name = type(connector).__name__
+            src_id = connector.source_id.lower()
+
+            is_github = "Github" in cls_name or "gh" in src_id or "github" in src_id
+            is_jira = "Jira" in cls_name or "jira" in src_id
+            is_bugzilla = "Bugzilla" in cls_name or "bugzilla" in src_id
+
+            try:
+                if is_github:
+                    for pg in range(1, 4):  # up to 3 pages, cap at 300
+                        batch = await asyncio.wait_for(
+                            connector.search("", max_results=100, page=pg),
+                            timeout=15.0,
+                        )
+                        if not batch:
+                            break
+                        tickets.extend(batch)
+                        if len(batch) < 100 or len(tickets) >= 300:
+                            break
+                    tickets = tickets[:300]
+                elif is_jira:
+                    for start_at in range(0, 500, 100):  # up to 5 batches, cap at 500
+                        batch = await asyncio.wait_for(
+                            connector.search("", max_results=100, start_at=start_at),
+                            timeout=15.0,
+                        )
+                        if not batch:
+                            break
+                        tickets.extend(batch)
+                        if len(batch) < 100 or len(tickets) >= 500:
+                            break
+                    tickets = tickets[:500]
+                elif is_bugzilla:
+                    tickets = list(await asyncio.wait_for(
+                        connector.search("", max_results=300),
                         timeout=15.0,
-                    )
-                    if not batch:
-                        break
-                    tickets.extend(batch)
-                    if len(batch) < 100:
-                        break
-            elif connector.system_type == "jira_apache":
-                for start_at in range(0, 100, 50):
-                    batch = await asyncio.wait_for(
-                        connector.search("", max_results=50, start_at=start_at),
+                    ) or [])
+                else:
+                    tickets = list(await asyncio.wait_for(
+                        connector.search("", max_results=50),
                         timeout=15.0,
-                    )
-                    if not batch:
-                        break
-                    tickets.extend(batch)
-                    if len(batch) < 50:
-                        break
-            elif connector.system_type == "bugzilla":
-                tickets = list(await asyncio.wait_for(
-                    connector.search("", max_results=500, offset=0),
-                    timeout=20.0,
-                ) or [])
-            else:
-                tickets = list(await asyncio.wait_for(
-                    connector.search("", max_results=100),
-                    timeout=15.0,
-                ) or [])
+                    ) or [])
+            except asyncio.TimeoutError:
+                print(f"[BugList] {connector.source_id} timed out, returning {len(tickets)} bugs fetched so far", flush=True)
 
             data = [dataclasses.asdict(t) for t in tickets]
-            ttl = 300 if len(data) > 10 else 60
-            await cache_buglist(connector.source_id, "open", "", data, ttl=ttl)
+            await cache_buglist(connector.source_id, "open", "", data, ttl=120)
             return connector.source_id, data, False
         except Exception as e:
             print(f"[BugList] {connector.source_id} failed: {type(e).__name__}: {str(e)[:100]}", flush=True)

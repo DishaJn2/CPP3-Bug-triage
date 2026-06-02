@@ -92,7 +92,7 @@ class GithubConnector(BaseConnector):
         except Exception:
             return None
 
-    async def search(self, query: str, max_results: int = 100, page: int = 1) -> list[TicketData]:
+    async def search(self, query: str, max_results: int = 300, page: int = 1) -> list[TicketData]:
         if query:
             url = f"https://api.github.com/search/issues"
             params = {"q": f"{query}+repo:{self._repo()}+is:issue+is:open", "per_page": min(max_results, 100), "page": page}
