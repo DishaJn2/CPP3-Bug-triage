@@ -184,6 +184,59 @@ async def remove_connection(
     return {"status": "disabled", "source_id": source_id}
 
 
+@router.put("/connections/{source_id}")
+async def update_connection(
+    source_id: str,
+    payload: dict,
+    user: User = Depends(get_current_user),
+):
+    if user.role not in ("admin", "engineer"):
+        raise HTTPException(status_code=403,
+                            detail="Not authorized")
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import update as sql_update
+            from ..orchestrator.db.models import SourceRegistry
+
+            update_data = {}
+            if "display_name" in payload:
+                update_data["display_name"] = payload["display_name"]
+            if "base_url" in payload:
+                update_data["base_url"] = payload["base_url"].rstrip("/")
+            if "project_key" in payload:
+                update_data["project_key"] = payload["project_key"]
+            if "ticket_prefix" in payload:
+                update_data["ticket_prefix"] = payload["ticket_prefix"]
+            if "token" in payload and payload["token"]:
+                # Store token reference
+                secret_ref = f"{source_id}_token".upper()
+                import os
+                os.environ[secret_ref] = payload["token"]
+                update_data["auth_secret_ref"] = secret_ref
+
+            if not update_data:
+                raise HTTPException(status_code=400,
+                                    detail="No fields to update")
+
+            await db.execute(
+                sql_update(SourceRegistry)
+                .where(SourceRegistry.source_id == source_id)
+                .values(**update_data)
+            )
+            await db.commit()
+
+        # Invalidate connector cache
+        from orchestrator.connectors.registry import ConnectorRegistry
+        ConnectorRegistry.invalidate_cache()
+
+        return {"status": "updated", "source_id": source_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/settings/connections/{source_id}/test")
 async def test_connection(
     source_id: str,

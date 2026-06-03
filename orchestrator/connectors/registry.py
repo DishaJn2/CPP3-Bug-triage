@@ -95,6 +95,15 @@ class ConnectorRegistry:
         return None
 
     @classmethod
+    async def get_all_by_type(cls,
+                               system_type: str) -> list[BaseConnector]:
+        connectors = await cls.get_all_enabled()
+        return [
+            c for c in connectors
+            if c.system_type == system_type
+        ]
+
+    @classmethod
     def invalidate_cache(cls) -> None:
         global _connector_cache, _cache_loaded
         _connector_cache = []

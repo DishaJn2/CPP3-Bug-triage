@@ -8,11 +8,19 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .kafka_client import kafka_lifespan
 from .routes import auth_router, cases_router, triage_router, settings_router
+from .config import ENABLE_LOCAL_PIPELINE_FALLBACK
+from .routes.cases_routes import _background_fetch_connector
 
 log = structlog.get_logger()
 
 
 async def start_kafka_consumer():
+    # Only run Kafka consumer if local fallback is disabled
+    # Running both causes double pipeline execution
+    if ENABLE_LOCAL_PIPELINE_FALLBACK:
+        log.info("Local fallback enabled — Kafka consumer "
+                 "not started to prevent double execution")
+        return
     try:
         from orchestrator.kafka_consumer import consume_triage_requests
         await consume_triage_requests()
@@ -32,71 +40,52 @@ async def lifespan(app: FastAPI):
             while True:
                 try:
                     await asyncio.sleep(600)  # Run every 10 minutes
-                    from orchestrator.connectors.registry import ConnectorRegistry
-                    from orchestrator.redis_client import cache_buglist
-                    import dataclasses
 
-                    ConnectorRegistry.invalidate_cache()
-                    connectors = await ConnectorRegistry.get_all_enabled()
-                    excluded = {"confluence", "customer_portal"}
+                    # Acquire Redis lock to prevent duplicate runs
+                    from orchestrator.redis_client import get_redis
+                    redis = await get_redis()
+                    lock = await redis.set(
+                        "lock:ingest:all", "active",
+                        ex=660, nx=True)
+                    if not lock:
+                        log.info("[Ingestion] Already running, skipping")
+                        continue
 
-                    for connector in connectors:
-                        if connector.system_type in excluded:
-                            continue
+                    try:
+                        from orchestrator.connectors.registry import (
+                            ConnectorRegistry)
+                        ConnectorRegistry.invalidate_cache()
+                        connectors = await ConnectorRegistry.get_all_enabled()
+                        excluded = {"confluence", "customer_portal"}
+
+                        fetch_tasks = [
+                            _background_fetch_connector(c)
+                            for c in connectors
+                            if c.system_type not in excluded
+                        ]
+
+                        # return_exceptions=True prevents one slow
+                        # connector from killing the entire batch
+                        results = await asyncio.gather(
+                            *fetch_tasks, return_exceptions=True)
+
+                        failed = sum(
+                            1 for exc in results
+                            if isinstance(exc, Exception))
+                        log.info(
+                            f"[Ingestion] Complete: "
+                            f"{len(fetch_tasks)-failed} ok, "
+                            f"{failed} failed")
+
+                    finally:
+                        # Always release lock even if ingestion fails
                         try:
-                            connector_class = type(connector).__name__.lower()
-                            tickets = []
-
-                            if "jira" in connector_class:
-                                for start_at in [0, 100, 200]:
-                                    batch = await asyncio.wait_for(
-                                        connector.search("", max_results=100,
-                                                         start_at=start_at),
-                                        timeout=20.0
-                                    )
-                                    if not batch:
-                                        break
-                                    tickets.extend(batch)
-                                    if len(batch) < 100:
-                                        break
-
-                            elif "github" in connector_class:
-                                for page in [1, 2, 3]:
-                                    batch = await asyncio.wait_for(
-                                        connector.search("", max_results=100,
-                                                         page=page),
-                                        timeout=15.0
-                                    )
-                                    if not batch:
-                                        break
-                                    tickets.extend(batch)
-                                    if len(batch) < 100:
-                                        break
-
-                            elif "bugzilla" in connector_class:
-                                tickets = await asyncio.wait_for(
-                                    connector.search("", max_results=300),
-                                    timeout=20.0
-                                )
-
-                            if tickets:
-                                data = [dataclasses.asdict(t) for t in tickets]
-                                await cache_buglist(
-                                    connector.source_id, "open", "", data,
-                                    ttl=700
-                                )
-                                log.info(
-                                    f"[Ingestion] {connector.source_id}: "
-                                    f"{len(data)} bugs refreshed"
-                                )
-
-                        except Exception as e:
-                            log.warning(
-                                f"[Ingestion] {connector.source_id} failed: {e}"
-                            )
+                            await redis.delete("lock:ingest:all")
+                        except Exception:
+                            pass
 
                 except Exception as e:
-                    log.warning(f"[Ingestion] cycle failed: {e}")
+                    log.warning(f"[Ingestion] Cycle error: {e}")
 
         ingestion_task = asyncio.create_task(background_ingestion())
         app.state.ingestion_task = ingestion_task

@@ -72,8 +72,7 @@ async def start_triage(
     if producer:
         published = await publish_triage_request(producer, case_id, bug_id, source_id, user.user_id)
 
-    # Always run locally when fallback is enabled — belt and suspenders
-    if ENABLE_LOCAL_PIPELINE_FALLBACK:
+    if not published and ENABLE_LOCAL_PIPELINE_FALLBACK:
         from orchestrator.orchestrator import TaskOrchestrator
         orch = TaskOrchestrator()
         asyncio.create_task(orch.run(case_id, bug_id, source_id, user.user_id))

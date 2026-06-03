@@ -46,37 +46,50 @@ class CrossSystemFetchAgent(BaseAgent):
 
         # Step C: Fire parallel searches with platform-specific queries
         async def search_one(connector):
-            connector_class = type(connector).__name__.lower()
-            if "jira" in connector_class:
-                query = query_map.get("jira_query", "")
-            elif "github" in connector_class:
-                query = query_map.get("github_query", "")
-            elif "bugzilla" in connector_class:
-                query = query_map.get("bugzilla_query", "")
+            ctype     = type(connector).__name__.lower()
+            source_id = connector.source_id
+
+            # Sisters get specific query; related get broad query
+            is_sister = (
+                self._get_family(source_id) ==
+                self._get_family(primary_source))
+
+            if "jira" in ctype:
+                query = (query_map.get("jira_query", "")
+                         if is_sister
+                         else query_map.get("broad_query", ""))
+            elif "github" in ctype:
+                query = (query_map.get("github_query", "")
+                         if is_sister
+                         else query_map.get("broad_query", ""))
+            elif "bugzilla" in ctype:
+                query = (query_map.get("bugzilla_query", "")
+                         if is_sister
+                         else query_map.get("broad_query", ""))
             else:
-                query = query_map.get("github_query", "")
+                query = query_map.get("broad_query", "")
 
             if not query:
-                return connector.source_id, []
+                return source_id, []
 
             try:
                 results = await asyncio.wait_for(
                     connector.search(query, max_results=8),
-                    timeout=12.0
-                )
+                    timeout=12.0)
                 log.info("CrossSystem result",
-                    source=connector.source_id,
-                    query=query,
-                    count=len(results)
-                )
-                return connector.source_id, results
+                         source=source_id,
+                         query=query,
+                         sister=is_sister,
+                         count=len(results))
+                return source_id, results
             except asyncio.TimeoutError:
-                log.warning("CrossSystem timeout", source=connector.source_id)
-                return connector.source_id, []
+                log.warning("CrossSystem timeout",
+                            source=source_id)
+                return source_id, []
             except Exception as e:
                 log.warning("CrossSystem error",
-                    source=connector.source_id, error=str(e))
-                return connector.source_id, []
+                            source=source_id, error=str(e))
+                return source_id, []
 
         gathered = await asyncio.gather(*[search_one(c) for c in targets])
 
@@ -186,41 +199,46 @@ class CrossSystemFetchAgent(BaseAgent):
         return context
 
     async def _generate_platform_queries(
-        self, primary: dict, api_key: str, model: str
-    ) -> dict:
-        title = primary.get("title", "")
-        component = primary.get("component", "") or ""
-        error_excerpt = (primary.get("error_excerpt") or "")[:400]
-        description = (primary.get("description") or "")[:300]
+            self, primary: dict,
+            api_key: str, model: str) -> dict:
+        title         = (primary.get("title") or "")
+        component     = (primary.get("component") or "")
+        error_excerpt = (primary.get("error_excerpt") or "")[:300]
+        description   = (primary.get("description") or "")[:200]
 
         fallback = self._deterministic_fallback(title, component)
 
         if not api_key:
-            return fallback
+            return {**fallback, "broad_query": component or fallback["jira_query"]}
 
-        prompt = f"""You are an expert systems engineer extracting
-search terms from a bug report to find duplicate issues.
-
-Strict rules:
-1. Strip ALL line numbers (use 'StorageController' not
-   'StorageController.java:142')
-2. Strip ALL hex addresses, thread IDs, timestamps, container IDs
-3. Focus ONLY on: Core Class Name, Exception Type, Component Name
-4. Maximum 2 words per query — be broad not specific
-5. Bad example: "NullPointerException StorageController.java:142
-   concurrent VM"
-6. Good example: "StorageController NullPointerException"
+        prompt = f"""You are an expert systems engineer finding
+duplicate bugs across different issue trackers.
 
 Bug:
 Title: {title}
 Component: {component}
-Error: {error_excerpt[:200]}
+Error: {error_excerpt}
+
+Generate TWO sets of search terms:
+1. SPECIFIC: 1-2 exact technical identifiers (class names,
+   exception types, method names) for searching the same
+   project's sister system
+2. BROAD: 1-2 general technical terms for searching related
+   projects in the same ecosystem
+
+Rules:
+- Strip ALL line numbers, hex addresses, thread IDs
+- No generic words: bug, issue, error, fail, problem
+- Examples:
+  specific: "NormalizeCTEIds" or "StorageController NPE"
+  broad: "SQL optimizer" or "storage allocation"
 
 Output JSON only:
 {{
-  "jira_query": "1-2 technical terms",
-  "github_query": "1-2 technical terms",
-  "bugzilla_query": "1-2 technical terms"
+  "jira_query":    "specific 1-2 terms",
+  "github_query":  "specific 1-2 terms",
+  "bugzilla_query":"specific 1-2 terms",
+  "broad_query":   "broad 1-2 terms for related projects"
 }}"""
 
         try:
@@ -230,30 +248,43 @@ Output JSON only:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 response_format={"type": "json_object"},
-                max_tokens=100,
+                max_tokens=120,
             )
             raw = resp.choices[0].message.content or "{}"
             parsed = json.loads(raw)
 
             result = {
-                "jira_query": str(parsed.get("jira_query", "")).strip()[:50],
-                "github_query": str(parsed.get("github_query", "")).strip()[:50],
-                "bugzilla_query": str(parsed.get("bugzilla_query", "")).strip()[:50],
+                "jira_query":    str(parsed.get(
+                    "jira_query", "")).strip()[:60],
+                "github_query":  str(parsed.get(
+                    "github_query", "")).strip()[:60],
+                "bugzilla_query":str(parsed.get(
+                    "bugzilla_query", "")).strip()[:60],
+                "broad_query":   str(parsed.get(
+                    "broad_query", "")).strip()[:60],
             }
 
-            # Validate — if any query is empty or too generic, use fallback
-            generic = {"bug", "issue", "error", "fix", "failure", "problem",
-                       "exception", "crash", "null", ""}
-            for key, val in result.items():
-                first_word = val.split()[0].lower() if val else ""
-                if not val or first_word in generic:
+            # Validate — fall back if generic
+            generic = {"bug", "issue", "error", "fix",
+                       "failure", "problem", "exception",
+                       "crash", "null", ""}
+            for key in ["jira_query", "github_query",
+                        "bugzilla_query"]:
+                first = result[key].split()[0].lower() \
+                    if result[key] else ""
+                if not result[key] or first in generic:
                     result[key] = fallback.get(key, "")
+            if not result["broad_query"]:
+                result["broad_query"] = component or \
+                    fallback["jira_query"]
 
             return result
 
         except Exception as e:
             log.warning("Query generation failed", error=str(e))
-            return fallback
+            return {**fallback,
+                    "broad_query": component or
+                    fallback["jira_query"]}
 
     def _deterministic_fallback(self, title: str, component: str) -> dict:
         import re
@@ -273,6 +304,16 @@ Output JSON only:
             "github_query": term[:50],
             "bugzilla_query": term[:50],
         }
+
+    def _get_family(self, source_id: str) -> str:
+        s = source_id.lower()
+        for p in ["apache-", "mozilla-", "microsoft-",
+                  "kubernetes-", "facebook-", "nodejs-"]:
+            s = s.replace(p, "")
+        for sx in ["-jira", "-github", "-bugzilla",
+                   "-gitlab", "-flink", "-github"]:
+            s = s.replace(sx, "")
+        return s.strip("-")
 
     def _select_targets(self, all_connectors: list, primary_source_id: str) -> list:
         excluded = {"confluence", "customer_portal"}

@@ -11,6 +11,20 @@ log = structlog.get_logger()
 
 class ConfluenceConnector(BaseConnector):
 
+    # Known correct base URLs for common confluence instances
+    KNOWN_BASE_URLS = {
+        "cwiki.apache.org":         "https://cwiki.apache.org/confluence",
+        "cpp3-hpe.atlassian.net":   "https://cpp3-hpe.atlassian.net/wiki",
+    }
+
+    MOCK_DOMAINS = [
+        "confluence.example.com",
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "example.com",
+    ]
+
     def _headers(self) -> dict:
         """
         Build auth headers.
@@ -45,16 +59,58 @@ class ConfluenceConnector(BaseConnector):
         clean = re.sub(r'[\s\t\n\r]+', ' ', clean).strip()
         return clean[:2000]
 
-    def _build_url(self, webui_path: str) -> str:
-        """Build absolute browser URL from relative webui path."""
+    def _build_url(self, webui_path: str,
+                   links_base: str = "") -> str:
+        bad_domains = [
+            "confluence.example.com",
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "example.com",
+        ]
+
+        # Best case: API gave us the base URL directly
+        # links_base + webui_path is always the correct URL
+        if links_base and webui_path:
+            clean_base = links_base.rstrip("/")
+            is_bad = any(b in clean_base for b in bad_domains)
+            if not is_bad:
+                return f"{clean_base}{webui_path}"
+
+        # Fallback: reconstruct from self.base_url
         base = self.base_url.rstrip("/")
-        # Public wikis include /confluence in base_url already
-        if webui_path.startswith("/wiki"):
-            return f"{base}{webui_path}"
-        elif "/confluence" in base:
-            return f"{base}/wiki{webui_path}"
-        else:
-            return f"{base}/wiki{webui_path}"
+        # Sanitize mock base
+        if any(b in base for b in bad_domains):
+            base = "https://cpp3-hpe.atlassian.net/wiki"
+
+        if not webui_path:
+            return base
+
+        # Already a full URL
+        if webui_path.startswith("http"):
+            if not any(b in webui_path for b in bad_domains):
+                return webui_path
+            try:
+                from urllib.parse import urlparse
+                webui_path = urlparse(webui_path).path
+            except Exception:
+                return base
+
+        path = webui_path.strip()
+        if not path.startswith("/"):
+            path = "/" + path
+
+        # Apache: base already has /confluence
+        if "cwiki.apache.org" in base:
+            if path.startswith("/confluence"):
+                return f"https://cwiki.apache.org{path}"
+            return f"{base}{path}"
+
+        # Atlassian Cloud: strip /wiki from path
+        if path.startswith("/wiki"):
+            return f"{base}{path[5:]}"
+
+        return f"{base}{path}"
 
     async def search(self, query: str,
                      max_results: int = 5) -> list[TicketData]:
@@ -109,9 +165,10 @@ class ConfluenceConnector(BaseConnector):
                         description = self._strip_html(body_raw)
                         version = r.get("version") or {}
                         when = version.get("when", "")
-                        webui = ((r.get("_links") or {})
-                                   .get("webui", ""))
-                        full_url = self._build_url(webui)
+                        links    = r.get("_links") or {}
+                        webui    = links.get("webui", "")
+                        api_base = links.get("base", "")
+                        full_url = self._build_url(webui, api_base)
 
                         tickets.append(TicketData(
                             ticket_id=str(r.get("id", "")),
@@ -165,8 +222,9 @@ class ConfluenceConnector(BaseConnector):
                 body_raw = (r.get("body", {})
                               .get("storage", {})
                               .get("value", ""))
-                webui = ((r.get("_links") or {})
-                           .get("webui", ""))
+                links    = r.get("_links") or {}
+                webui    = links.get("webui", "")
+                api_base = links.get("base", "")
                 return TicketData(
                     ticket_id=str(r.get("id", "")),
                     title=r.get("title", ""),
@@ -180,7 +238,7 @@ class ConfluenceConnector(BaseConnector):
                     updated_at="",
                     source_id=self.source_id,
                     system_type=self.system_type,
-                    url=self._build_url(webui),
+                    url=self._build_url(webui, api_base),
                 )
         except Exception as e:
             log.warning("Confluence get error",

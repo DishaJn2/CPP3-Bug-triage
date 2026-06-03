@@ -128,79 +128,86 @@ async def debug_sources():
     }
 
 
-async def fetch_for_connector(connector):
-    excluded_types = {"confluence", "customer_portal"}
-    if connector.system_type in excluded_types:
-        return connector.source_id, [], False
-
-    cached = await get_cached_buglist(connector.source_id, "open", "")
-    if cached is not None:
-        print(f"[BugList] {connector.source_id}: {len(cached)} bugs (cache hit)")
-        return connector.source_id, cached, True
-
-    connector_class = type(connector).__name__.lower()
-    tickets = []
-
+async def _background_fetch_connector(connector) -> None:
     try:
+        connector_class = type(connector).__name__.lower()
+        tickets = []
+
         if "jira" in connector_class:
             for start_at in [0, 100, 200]:
                 try:
                     batch = await asyncio.wait_for(
-                        connector.search("", max_results=100, start_at=start_at),
-                        timeout=20.0
-                    )
+                        connector.search(
+                            "", max_results=100,
+                            start_at=start_at),
+                        timeout=20.0)
                     if not batch:
                         break
                     tickets.extend(batch)
                     if len(batch) < 100:
                         break
-                except (asyncio.TimeoutError, Exception) as e:
-                    print(f"[BugList] {connector.source_id} page failed at start_at={start_at}: {e}")
+                except (asyncio.TimeoutError, Exception):
                     break
 
         elif "github" in connector_class:
-            for page_num in [1, 2, 3]:
+            for page in [1, 2, 3]:
                 try:
                     batch = await asyncio.wait_for(
-                        connector.search("", max_results=100, page=page_num),
-                        timeout=15.0
-                    )
+                        connector.search(
+                            "", max_results=100, page=page),
+                        timeout=15.0)
                     if not batch:
                         break
                     tickets.extend(batch)
                     if len(batch) < 100:
                         break
-                except (asyncio.TimeoutError, Exception) as e:
-                    print(f"[BugList] {connector.source_id} page {page_num} failed: {e}")
+                except (asyncio.TimeoutError, Exception):
                     break
 
         elif "bugzilla" in connector_class:
             try:
                 tickets = await asyncio.wait_for(
                     connector.search("", max_results=300),
-                    timeout=20.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                print(f"[BugList] {connector.source_id} failed: {e}")
+                    timeout=20.0)
+            except (asyncio.TimeoutError, Exception):
                 tickets = []
 
         else:
             try:
                 tickets = await asyncio.wait_for(
                     connector.search("", max_results=50),
-                    timeout=10.0
-                )
-            except Exception:
+                    timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
                 tickets = []
 
+        if tickets:
+            data = [dataclasses.asdict(t) for t in tickets]
+            await cache_buglist(
+                connector.source_id, "open", "",
+                data, ttl=300)
+            print(f"[BugList] {connector.source_id}: "
+                  f"{len(data)} bugs cached")
+
     except Exception as e:
-        print(f"[BugList] {connector.source_id} unexpected error: {e}")
+        print(f"[BugList] {connector.source_id} "
+              f"background fetch error: {e}")
+
+
+async def fetch_for_connector(connector):
+    excluded = {"confluence", "customer_portal"}
+    if connector.system_type in excluded:
         return connector.source_id, [], False
 
-    data = [dataclasses.asdict(t) for t in tickets]
-    await cache_buglist(connector.source_id, "open", "", data, ttl=300)
-    print(f"[BugList] {connector.source_id}: {len(data)} bugs fetched and cached")
-    return connector.source_id, data, False
+    cached = await get_cached_buglist(
+        connector.source_id, "open", "")
+    if cached is not None:
+        return connector.source_id, cached, True
+
+    # Cache miss: trigger background fetch and return empty
+    # User gets instant response, cache fills in background
+    asyncio.create_task(
+        _background_fetch_connector(connector))
+    return connector.source_id, [], False
 
 
 @router.get("/bugs")
@@ -243,36 +250,26 @@ async def get_bugs(
             pass
 
     if search:
-        # Query normalization
         sl = search.strip().lower()
 
         def matches(b: dict) -> bool:
-            # 1. Ticket ID
             if sl in (b.get("ticket_id") or "").lower():
                 return True
-            # 2. Title
             if sl in (b.get("title") or "").lower():
                 return True
-            # 3. Component
             if sl in (b.get("component") or "").lower():
                 return True
-            # 4. Source ID
             if sl in (b.get("source_id") or "").lower():
                 return True
-            # 5. System type
             if sl in (b.get("system_type") or "").lower():
                 return True
-            # 6. Severity
             if sl in (b.get("severity") or "").lower():
                 return True
-            # 7. Status
             if sl in (b.get("status") or "").lower():
                 return True
-            # 8. Description — first 200 chars only (performance bounded)
-            desc_prefix = (b.get("description") or "")[:200].lower()
-            if sl in desc_prefix:
+            desc = (b.get("description") or "")[:200].lower()
+            if sl in desc:
                 return True
-            # 9. Labels array
             for label in (b.get("labels") or []):
                 if sl in str(label).lower():
                     return True
@@ -363,7 +360,11 @@ async def refresh_bugs(user: User = Depends(get_current_user)):
 
 
 @router.get("/bugs/{bug_id}/status")
-async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
+async def get_bug_status(
+    bug_id: str,
+    user: User = Depends(get_current_user),
+):
+    # Step 1: Fetch last audit record
     async with AsyncSessionLocal() as db:
         last_triage = await get_last_triage_for_bug(db, bug_id)
 
@@ -377,20 +378,39 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
             "last_confidence": None,
         }
 
-    summary = last_triage.summary or {}
-    last_triaged_at = last_triage.created_at.isoformat() if last_triage.created_at else None
+    summary          = last_triage.summary or {}
     ticket_updated_at = summary.get("updated_at", "")
-    last_severity = summary.get("severity") or summary.get("unified_severity", "")
-    last_status = summary.get("status", "")
-    last_confidence = summary.get("confidence", 0)
+    last_severity    = summary.get("severity", "")
+    last_status      = summary.get("status", "")
+    last_confidence  = summary.get("confidence", 0)
+    last_triaged_at  = (
+        last_triage.created_at.isoformat()
+        if last_triage.created_at else None
+    )
 
-    connector = await ConnectorRegistry.get_connector(last_triage.source_id or "")
+    # Step 1b: Resolve connector
+    connector = None
+    try:
+        connector = await ConnectorRegistry.get_connector(
+            last_triage.source_id or "")
+    except Exception:
+        pass
+
     if not connector:
-        connectors = await ConnectorRegistry.get_all_enabled()
-        for c in connectors:
-            if c.ticket_prefix and bug_id.upper().startswith(c.ticket_prefix.upper()):
-                connector = c
-                break
+        try:
+            connectors = await ConnectorRegistry.get_all_enabled()
+            bug_upper = bug_id.upper()
+            sorted_c = sorted(
+                connectors,
+                key=lambda c: len(c.ticket_prefix or ""),
+                reverse=True)
+            for c in sorted_c:
+                prefix = (c.ticket_prefix or "").upper().strip()
+                if prefix and bug_upper.startswith(prefix):
+                    connector = c
+                    break
+        except Exception:
+            pass
 
     if not connector:
         return {
@@ -402,7 +422,18 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
             "needs_retriage": False,
         }
 
-    live = await connector.get_lightweight(bug_id)
+    # Step 2: Lightweight freshness check
+    # Only fetch updated_at, severity, status — NOT full ticket
+    live = {}
+    try:
+        live = await asyncio.wait_for(
+            connector.get_lightweight(bug_id),
+            timeout=8.0)
+    except Exception as e:
+        import structlog
+        structlog.get_logger().warning(
+            "get_lightweight failed",
+            bug_id=bug_id, error=str(e))
 
     if not live:
         return {
@@ -414,10 +445,15 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
             "needs_retriage": False,
         }
 
+    # Step 3: Decide path
+    live_updated_at = live.get("updated_at", "")
+    live_severity   = live.get("severity", "")
+    live_status     = live.get("status", "")
+
     no_change = (
-        live.get("updated_at", "") <= ticket_updated_at
-        and live.get("severity") == last_severity
-        and live.get("status") == last_status
+        live_updated_at <= ticket_updated_at
+        and live_severity == last_severity
+        and live_status == last_status
     )
 
     if no_change:
@@ -430,38 +466,60 @@ async def get_bug_status(bug_id: str, user: User = Depends(get_current_user)):
             "needs_retriage": False,
         }
 
+    # Step 4: Change detected — fetch detailed changelog
     changelog = []
     try:
-        changelog = await connector.get_changelog(bug_id, since=ticket_updated_at)
+        changelog = await asyncio.wait_for(
+            connector.get_changelog(
+                bug_id, since=ticket_updated_at),
+            timeout=10.0)
     except Exception:
         pass
 
-    relevant_fields = {"priority", "status", "severity", "assignee", "resolution"}
+    # Step 5: Filter and build response
+    relevant = {
+        "priority", "status", "severity",
+        "assignee", "resolution", "description"
+    }
     changes = [
         {
-            "field": e.field,
-            "from": e.old_value,
-            "to": e.new_value,
+            "field":      e.field,
+            "from":       e.old_value,
+            "to":         e.new_value,
             "changed_at": e.changed_at,
             "changed_by": e.changed_by,
         }
         for e in changelog
-        if e.field.lower() in relevant_fields
+        if e.field.lower() in relevant
     ]
 
+    # If changelog empty but lightweight detected a change,
+    # build changes from the field comparison directly
     if not changes:
-        if live.get("severity") != last_severity and last_severity:
-            changes.append({"field": "severity", "from": last_severity, "to": live.get("severity"), "changed_at": live.get("updated_at"), "changed_by": ""})
-        if live.get("status") != last_status and last_status:
-            changes.append({"field": "status", "from": last_status, "to": live.get("status"), "changed_at": live.get("updated_at"), "changed_by": ""})
+        if live_severity and live_severity != last_severity:
+            changes.append({
+                "field":      "severity",
+                "from":       last_severity,
+                "to":         live_severity,
+                "changed_at": live_updated_at,
+                "changed_by": "",
+            })
+        if live_status and live_status != last_status:
+            changes.append({
+                "field":      "status",
+                "from":       last_status,
+                "to":         live_status,
+                "changed_at": live_updated_at,
+                "changed_by": "",
+            })
 
     return {
-        "is_new": False,
+        "is_new":          False,
         "last_triaged_at": last_triaged_at,
-        "last_severity": last_severity,
+        "last_severity":   last_severity,
         "last_confidence": last_confidence,
-        "changes": changes,
-        "needs_retriage": True,
+        "changes":         changes,
+        "needs_retriage":  True,
     }
 
 

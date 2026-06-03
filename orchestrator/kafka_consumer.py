@@ -28,6 +28,9 @@ async def consume_triage_requests():
                 auto_offset_reset="earliest",
                 enable_auto_commit=False,
                 value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                session_timeout_ms=45000,
+                heartbeat_interval_ms=10000,
+                max_poll_interval_ms=300000,
             )
             await consumer.start()
             log.info("Kafka consumer started", topic=topic, group=group_id)
