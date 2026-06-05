@@ -38,6 +38,9 @@ async def assemble_grouped_bug_list(
     all_ticket_ids: set[str] = {
         b["ticket_id"] for b in raw_bugs if b.get("ticket_id")
     }
+    live_by_ticket = {
+        b["ticket_id"]: b for b in raw_bugs if b.get("ticket_id")
+    }
 
     # Step 2: batch group-mapping lookup
     group_map: dict[str, str] = {}        # raw_ticket_id → group_id
@@ -71,13 +74,29 @@ async def assemble_grouped_bug_list(
                     if grp.created_at else ""),
             }
 
-    # Step 4: batch triage-info lookup
+    # Step 4: expand all group mappings for groups touched by this page
+    group_members: dict[str, list] = defaultdict(list)
+    if group_ids:
+        result = await db.execute(
+            select(BugGroupMapping).where(
+                BugGroupMapping.group_id.in_(list(group_ids)))
+        )
+        for mapping in result.scalars().all():
+            group_members[mapping.group_id].append(mapping)
+
+    expanded_ticket_ids = set(all_ticket_ids)
+    for members in group_members.values():
+        for member in members:
+            if member.raw_ticket_id:
+                expanded_ticket_ids.add(member.raw_ticket_id)
+
+    # Step 5: batch triage-info lookup
     triage_map: dict[str, dict] = {}
-    if all_ticket_ids:
+    if expanded_ticket_ids:
         result = await db.execute(
             select(AuditLog)
             .where(
-                AuditLog.bug_id.in_(list(all_ticket_ids)),
+                AuditLog.bug_id.in_(list(expanded_ticket_ids)),
                 AuditLog.step == "pipeline_complete",
             )
             .order_by(AuditLog.bug_id, desc(AuditLog.created_at))
@@ -103,44 +122,74 @@ async def assemble_grouped_bug_list(
                     "duration_ms": entry.duration_ms or 0,
                 }
 
-    # Step 5: split grouped vs. ungrouped
-    grouped_bugs   = [
-        b for b in raw_bugs
-        if b.get("ticket_id", "") in group_map
-    ]
+    def member_to_bug(member: BugGroupMapping) -> dict:
+        live = live_by_ticket.get(member.raw_ticket_id, {})
+        return {
+            "ticket_id": member.raw_ticket_id,
+            "source": (
+                live.get("source")
+                or member.system_type
+                or member.source_id),
+            "source_id": member.source_id,
+            "system_type": (
+                live.get("system_type")
+                or member.system_type
+                or member.source_id),
+            "source_display_name": live.get(
+                "source_display_name", member.source_id),
+            "title": live.get("title") or member.title or "",
+            "severity": (
+                live.get("severity")
+                or member.severity
+                or "Unknown"),
+            "status": live.get("status") or member.status or "open",
+            "assignee": live.get("assignee", ""),
+            "updated_at": live.get("updated_at", ""),
+            "url": live.get("url") or member.url or "",
+            "similarity_score": member.similarity_score,
+            "similarity_label": member.similarity_label or "",
+            "similarity_reason": member.similarity_reason or "",
+            "role": member.role or "child",
+            "triage_info": triage_map.get(member.raw_ticket_id),
+            "is_triaged": member.raw_ticket_id in triage_map,
+        }
+
+    # Step 6: split grouped vs. ungrouped
     ungrouped_bugs = [
         b for b in raw_bugs
         if b.get("ticket_id", "") not in group_map
     ]
 
-    # Step 6: build group parent rows
-    by_group: dict[str, list] = defaultdict(list)
-    for bug in grouped_bugs:
-        by_group[group_map[bug["ticket_id"]]].append(bug)
-
+    # Step 7: build explicit group root + child rows
     _PRIO = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "Unknown": 4}
     group_rows = []
-    for gid, children in by_group.items():
+    for gid, members in group_members.items():
         info = group_info.get(gid, {})
-        child_rows = []
-        for child in children:
-            tid = child.get("ticket_id", "")
-            c   = dict(child)
-            c["triage_info"] = triage_map.get(tid)
-            c["is_triaged"]  = tid in triage_map
-            child_rows.append(c)
-        primary_tid = (
-            children[0].get("ticket_id", "") if children else "")
+        member_rows = [member_to_bug(member) for member in members]
+        root = next(
+            (row for row in member_rows if row.get("role") == "root"),
+            member_rows[0] if member_rows else None,
+        )
+        if not root:
+            continue
+        child_rows = [
+            row for row in member_rows
+            if row.get("ticket_id") != root.get("ticket_id")
+        ]
         group_rows.append({
             "group_id":   gid,
             "type":       "group",
-            "priority":   info.get("priority", "Unknown"),
+            "priority":   (
+                info.get("priority")
+                or root.get("severity")
+                or "Unknown"),
             "status":     info.get("status", "active"),
-            "title":      info.get("title", ""),
+            "title":      info.get("title") or root.get("title", ""),
             "created_at": info.get("created_at", ""),
-            "child_count": len(children),
+            "child_count": len(child_rows),
+            "root":       root,
             "children":   child_rows,
-            "triage_info": triage_map.get(primary_tid),
+            "triage_info": root.get("triage_info"),
         })
     group_rows.sort(key=lambda g: (
         _PRIO.get(g["priority"], 4),
@@ -531,11 +580,12 @@ async def get_bugs(
             bug["triage_info"] = None
         assembled = {"ungrouped": page_bugs, "groups": []}
 
-    # Build flat bugs list for frontend (ungrouped + group children)
+    # Build flat bugs list for frontend (ungrouped + group root/children)
     flat_bugs = assembled.get("ungrouped", []) + [
-        child
+        item
         for group in assembled.get("groups", [])
-        for child in group.get("children", [])
+        for item in ([group.get("root")] + group.get("children", []))
+        if item
     ]
 
     if not cache_statuses:
@@ -935,15 +985,28 @@ async def get_case_result(
     user: User = Depends(get_current_user),
 ):
     from fastapi import HTTPException
-    from orchestrator.redis_client import get_cached_case_result, get_redis
+    from orchestrator.redis_client import (
+        get_cached_case_result,
+        get_redis,
+        get_stored_panels,
+    )
     cached = await get_cached_case_result(case_id)
+    stored_panels = await get_stored_panels(case_id)
     if not cached:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Case result not found. "
-                "Results are cached for 1 hour after triage."),
-        )
+        if not stored_panels:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Case result not found. "
+                    "Results are cached for 1 hour after triage."),
+            )
+        return {
+            "case_id": case_id,
+            "status": "in_progress",
+            "from_cache": False,
+            "panels": stored_panels,
+            "context": _context_from_panels(stored_panels),
+        }
 
     # BUG3: if Panel 2/3 are missing from cached context, recover from
     # dedicated per-case keys (set by orchestrator after Phase 2)
@@ -967,3 +1030,33 @@ async def get_case_result(
         pass
 
     return cached
+
+
+def _context_from_panels(panels: list[dict]) -> dict:
+    ctx = {}
+    for event in panels or []:
+        panel = event.get("panel")
+        data = event.get("data") or {}
+        if panel == "bug_context":
+            ctx.update({
+                "bug_context": data.get("bug_context") or {},
+                "primary_ticket": data.get("primary_ticket"),
+                "components": data.get("components") or [],
+                "customer_cases": data.get("customer_cases") or [],
+                "customer_signals": data.get("customer_signals") or [],
+                "source_references": data.get("source_references") or [],
+            })
+        elif panel == "related_issues":
+            ctx["related_tickets"] = data.get("related_tickets") or []
+            ctx["sources_queried"] = data.get("sources_queried") or []
+        elif panel in {"linked_context", "knowledge_base"}:
+            ctx["kb_articles"] = data.get("kb_articles") or []
+            ctx["kb_reasoning"] = data.get("kb_reasoning") or ""
+            if data.get("customer_cases"):
+                ctx["customer_cases"] = data.get("customer_cases")
+        elif panel == "ai_summary":
+            ctx["synthesis"] = data.get("synthesis") or {}
+            ctx["errors"] = data.get("errors") or {}
+        elif event.get("type") == "pipeline_done":
+            ctx["pipeline_done"] = event
+    return ctx

@@ -87,7 +87,7 @@ class FakeConnector:
 
 
 class FakePortal:
-    async def search(self, query: str, max_results: int = 3):
+    async def search(self, query: str, max_results: int = 3, **kwargs):
         return [
             TicketData(
                 ticket_id="CASE-100",
@@ -128,12 +128,20 @@ class FakeRegistry:
 class FakeRedis:
     def __init__(self):
         self.messages = []
+        self.lists = {}
 
     async def setex(self, key, ttl, value):
         self.messages.append(("setex", key, value))
 
     async def rpush(self, key, value):
         self.messages.append(("rpush", key, value))
+        self.lists.setdefault(key, []).append(value)
+
+    async def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end == -1:
+            return values[start:]
+        return values[start:end + 1]
 
     async def expire(self, key, ttl):
         self.messages.append(("expire", key, ttl))
@@ -164,6 +172,7 @@ def test_full_primary_ticket_is_fetched_and_normalized(monkeypatch):
     assert bug_context["ticket_id"] == "STO-1089"
     assert bug_context["linked_items"][0]["raw_id"] == "BUG-49201"
     assert bug_context["customer_cases"][0]["case_id"] == "CASE-100"
+    assert bug_context["customer_signals"][0]["case_id"] == "CASE-100"
 
 
 def test_missing_source_id_resolves_using_ticket_prefix(monkeypatch):
@@ -248,3 +257,70 @@ def test_fetch_failure_returns_structured_error_without_crashing(monkeypatch):
     assert context["bug_context"]["source_id"] == "jira-storage"
     assert "source unavailable" in context["errors"]["context_fetch"]
     assert "source unavailable" in context["bug_context"]["errors"]["context_fetch"]
+
+
+def test_context_fetch_attaches_customer_signals(monkeypatch):
+    class SignalPortal:
+        last_error = {}
+
+        async def search(self, query: str, max_results: int = 3, **kwargs):
+            ticket = TicketData(
+                ticket_id="SO-123",
+                title="Stack question about StorageController NPE",
+                description="Question has 1200 views and score 12.",
+                severity="P1",
+                status="answered",
+                component="",
+                assignee="",
+                reporter="dev-user",
+                created_at="",
+                updated_at="",
+                source_id="customer-portal",
+                system_type="customer_portal",
+                url="https://stackoverflow.com/questions/123",
+            )
+            ticket.signal_metadata = {
+                "case_id": "SO-123",
+                "source": "Stack Overflow",
+                "customer_name": "dev-user",
+                "severity": "P1",
+                "status": "answered",
+                "summary": "Stack question about StorageController NPE",
+                "impact": "Question has 1200 views and score 12.",
+                "url": "https://stackoverflow.com/questions/123",
+                "linked_ticket_id": "123",
+                "signal_score": 0.92,
+            }
+            return [ticket]
+
+    connector = FakeConnector()
+    FakeRegistry.connector = connector
+    FakeRegistry.portals = [SignalPortal()]
+    monkeypatch.setattr(context_fetch_module, "ConnectorRegistry", FakeRegistry)
+
+    context = run(ContextFetchAgent().run({
+        "bug_id": "STO-1089",
+        "source_id": "jira-storage",
+        "errors": {},
+    }))
+
+    signal = context["bug_context"]["customer_signals"][0]
+    assert signal == context["customer_signals"][0]
+    assert signal["case_id"] == "SO-123"
+    assert signal["source"] == "Stack Overflow"
+    assert signal["customer_name"] == "dev-user"
+    assert signal["signal_score"] == 0.92
+
+
+def test_linked_items_without_urls_are_made_clickable():
+    class JiraConnectorRef:
+        system_type = "jira"
+        base_url = "https://jira.example.test"
+        project_key = ""
+
+    linked = ContextFetchAgent()._normalize_linked_items(
+        JiraConnectorRef(),
+        [{"id": "STO-999", "type": "relates", "title": "Linked issue"}],
+    )
+
+    assert linked[0]["url"] == "https://jira.example.test/browse/STO-999"

@@ -22,6 +22,14 @@ function SrcBadge({ type }) {
   return <span className={`sb ${cls}`}>{lbl}</span>
 }
 
+function signalLabel(source) {
+  const s = (source || '').toLowerCase()
+  if (s.includes('hacker')) return 'Hacker News Signal'
+  if (s.includes('stack')) return 'Stack Overflow Signal'
+  if (s.includes('github')) return 'GitHub Downstream Signal'
+  return 'Customer Signal'
+}
+
 const toPercent = (score) => {
   if (score == null) return 0
   if (score > 1) return Math.min(Math.round(score), 100)
@@ -86,6 +94,7 @@ export default function ResultsPage() {
   const sevBlockCls = { P0: 'p0-b', P1: 'p1-b', P2: 'p2-b', P3: 'p3-b' }[synthesis.unified_severity] || 'p3-b'
   const caseShort  = `BT-${caseId.slice(-5).toUpperCase()}`
   const srcType    = ticket.system_type || ticket.source
+  const customerSignals = ticket.customer_signals || ctx.customer_signals || ctx.customer_cases || []
 
   return (
     <div className="fade-in">
@@ -120,6 +129,36 @@ export default function ResultsPage() {
               <>
                 <div className="panel-div" />
                 <p className="desc-txt">{ticket.description.slice(0, 500)}{ticket.description.length > 500 ? '…' : ''}</p>
+              </>
+            )}
+            {customerSignals.length > 0 && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">PUBLIC CUSTOMER SIGNALS</div>
+                {customerSignals.map((cc, i) => (
+                  <div
+                    key={i}
+                    className="cust-card"
+                    onClick={() => cc.url && window.open(cc.url, '_blank', 'noopener,noreferrer')}
+                    style={{ cursor: cc.url ? 'pointer' : 'default' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--blue)' }}>{signalLabel(cc.source)}</span>
+                      <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: 'var(--teal)' }}>{cc.case_id}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)' }}>{cc.severity}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.customer_name || cc.customer}</span>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{cc.summary || cc.title}</div>
+                    {cc.impact && (
+                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.impact.slice(0, 120)}</div>
+                    )}
+                    {cc.url && (
+                      <a href={cc.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--blue)' }} onClick={(e) => e.stopPropagation()}>
+                        Open signal
+                      </a>
+                    )}
+                  </div>
+                ))}
               </>
             )}
           </div>

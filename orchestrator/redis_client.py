@@ -9,6 +9,15 @@ load_dotenv()
 log = structlog.get_logger()
 _redis_client = None
 BUGLIST_CACHE_TTL_SECONDS = 120
+PANEL_TTL_SECONDS = 3600
+PANEL_ORDER = [
+    "bug_context",
+    "related_issues",
+    "linked_context",
+    "knowledge_base",
+    "ai_summary",
+    "pipeline_done",
+]
 
 
 def buglist_cache_key(source_id: str, status: str, severity: str) -> str:
@@ -65,17 +74,8 @@ async def get_cached_buglist(source_id: str, status: str, severity: str) -> list
 
 async def publish_panel_update(case_id: str, panel_name: str, data: dict) -> None:
     try:
+        message = await store_panel_update(case_id, panel_name, data)
         r = await get_redis()
-        message = json.dumps({"panel": panel_name, "data": data})
-
-        # Persist panel so late-connecting WebSockets can replay it
-        await r.setex(f"panel:{case_id}:{panel_name}", 3600, message)
-
-        # Track order of panels for this case
-        await r.rpush(f"panels:{case_id}", panel_name)
-        await r.expire(f"panels:{case_id}", 3600)
-
-        # Publish to live listeners
         await r.publish(f"ws:{case_id}", message)
 
         log.info("Panel published",
@@ -85,21 +85,80 @@ async def publish_panel_update(case_id: str, panel_name: str, data: dict) -> Non
         log.warning("publish_panel_update failed", error=str(e))
 
 
+async def store_panel_update(
+        case_id: str,
+        panel_name: str,
+        data: dict,
+        agent: str = "",
+        status: str = "completed") -> str:
+    r = await get_redis()
+    message = json.dumps({
+        "panel": panel_name,
+        "agent": agent,
+        "status": status,
+        "data": data,
+    })
+    await r.setex(
+        f"panel:{case_id}:{panel_name}", PANEL_TTL_SECONDS, message)
+    existing = await r.lrange(f"panels:{case_id}", 0, -1)
+    names = [
+        item.decode() if isinstance(item, bytes) else item
+        for item in existing
+    ]
+    if panel_name not in names:
+        await r.rpush(f"panels:{case_id}", panel_name)
+    await r.expire(f"panels:{case_id}", PANEL_TTL_SECONDS)
+    return message
+
+
+async def publish_pipeline_done(
+        case_id: str,
+        status: str,
+        duration_ms: int,
+        severity: str = "",
+        confidence: float | None = None,
+        error: str = "") -> str:
+    r = await get_redis()
+    message = json.dumps({
+        "type": "pipeline_done",
+        "case_id": case_id,
+        "status": status,
+        "panels": [
+            "bug_context",
+            "related_issues",
+            "knowledge_base",
+            "ai_summary",
+        ],
+        "severity": severity,
+        "confidence": confidence,
+        "duration_ms": duration_ms,
+        "error": error,
+    })
+    await r.setex(
+        f"panel:{case_id}:pipeline_done", PANEL_TTL_SECONDS, message)
+    existing = await r.lrange(f"panels:{case_id}", 0, -1)
+    names = [
+        item.decode() if isinstance(item, bytes) else item
+        for item in existing
+    ]
+    if "pipeline_done" not in names:
+        await r.rpush(f"panels:{case_id}", "pipeline_done")
+    await r.expire(f"panels:{case_id}", PANEL_TTL_SECONDS)
+    await r.publish(f"ws:{case_id}", message)
+    return message
+
+
 async def store_pipeline_complete(case_id: str, severity: str,
                                    confidence: float,
                                    duration_ms: int) -> None:
     try:
-        r = await get_redis()
-        message = json.dumps({
-            "type": "pipeline_complete",
-            "case_id": case_id,
-            "severity": severity,
-            "confidence": confidence,
-            "duration_ms": duration_ms,
-        })
-        await r.setex(f"panel:{case_id}:pipeline_complete", 3600, message)
-        await r.rpush(f"panels:{case_id}", "pipeline_complete")
-        await r.expire(f"panels:{case_id}", 3600)
+        await publish_pipeline_done(
+            case_id=case_id,
+            status="completed",
+            severity=severity,
+            confidence=confidence,
+            duration_ms=duration_ms,
+        )
     except Exception as e:
         log.warning("store_pipeline_complete failed", error=str(e))
 
@@ -109,8 +168,19 @@ async def get_stored_panels(case_id: str) -> list[dict]:
     try:
         r = await get_redis()
         panel_names = await r.lrange(f"panels:{case_id}", 0, -1)
+        seen = set()
         panels = []
-        for name in panel_names:
+        names = [
+            name.decode() if isinstance(name, bytes) else name
+            for name in panel_names
+        ]
+        names.sort(key=lambda name: (
+            PANEL_ORDER.index(name)
+            if name in PANEL_ORDER else len(PANEL_ORDER)))
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
             key = f"panel:{case_id}:{name}"
             val = await r.get(key)
             if val:

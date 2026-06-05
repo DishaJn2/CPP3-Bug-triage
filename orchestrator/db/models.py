@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base
@@ -130,6 +130,14 @@ class BugGroupMapping(Base):
     raw_ticket_id: Mapped[str]           = mapped_column(String(200), nullable=False)
     source_id:     Mapped[str]           = mapped_column(String(100), nullable=False)
     system_type:   Mapped[str]           = mapped_column(String(50), nullable=True)
+    role:          Mapped[str]           = mapped_column(String(20), nullable=False, default="child")
+    title:         Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    url:           Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status:        Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    severity:      Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    similarity_score:  Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    similarity_label:  Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    similarity_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at:    Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (

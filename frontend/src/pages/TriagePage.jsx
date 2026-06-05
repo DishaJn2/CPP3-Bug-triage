@@ -24,6 +24,14 @@ function SevBadge({ sev }) {
   return <span className={`sev ${SEV_CLS[sev] || 'sev-unk'}`}>{sev || 'UNK'}</span>
 }
 
+function signalLabel(source) {
+  const s = (source || '').toLowerCase()
+  if (s.includes('hacker')) return 'Hacker News Signal'
+  if (s.includes('stack')) return 'Stack Overflow Signal'
+  if (s.includes('github')) return 'GitHub Downstream Signal'
+  return 'Customer Signal'
+}
+
 const TEAM_COLORS = [
   { bg: 'var(--blue-lt)',   color: 'var(--blue)',   bd: 'var(--blue-bd)'   },
   { bg: 'var(--purple-lt)', color: 'var(--purple)', bd: 'var(--purple-bd)' },
@@ -149,7 +157,7 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
   const srcType   = ticket.system_type || ticket.source
   const caseShort = `BT-${caseId.slice(-5).toUpperCase()}`
 
-  const customerCases = ticket.customer_cases || ctx.customer_cases || linked.customer_cases || []
+  const customerCases = ticket.customer_signals || ticket.customer_cases || ctx.customer_signals || ctx.customer_cases || linked.customer_signals || linked.customer_cases || []
   const recentComments = ticket.recent_comments || ticket.comments || []
   const linkedItems = ticket.linked_items || []
 
@@ -261,9 +269,16 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
               <>
                 <div className="panel-div" />
                 <div className="sec-label">LINKED ITEMS</div>
-                {linkedItems.map((item, i) => (
-                  <div key={i} className="cust-card">
-                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>
+                {linkedItems.map((item, i) => {
+                  const hasUrl = item.url && item.url.startsWith('http')
+                  return (
+                    <div
+                      key={i}
+                      className="cust-card"
+                      onClick={() => hasUrl && window.open(item.url, '_blank', 'noopener,noreferrer')}
+                      style={{ cursor: hasUrl ? 'pointer' : 'default' }}
+                    >
+                    <div style={{ fontSize: 12, fontWeight: 700, color: hasUrl ? 'var(--blue)' : 'var(--text)' }}>
                       {item.raw_id || item.ticket_id || item.id || item.title || 'Linked item'}
                     </div>
                     {(item.type || item.relationship || item.source) && (
@@ -271,39 +286,48 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                         {[item.type || item.relationship, item.source].filter(Boolean).join(' · ')}
                       </div>
                     )}
-                    {item.url && (
-                      <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--blue)' }}>
+                    {hasUrl && (
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--blue)' }} onClick={(e) => e.stopPropagation()}>
                         Open linked item
                       </a>
                     )}
                   </div>
-                ))}
+                  )
+                })}
               </>
             )}
 
             {customerCases.length > 0 && (
               <>
                 <div className="panel-div" />
-                <div className="sec-label">RELATED CUSTOMER CASES</div>
+                <div className="sec-label">PUBLIC CUSTOMER SIGNALS</div>
                 {customerCases.map((cc, i) => (
                   <div
                     key={i}
                     className="cust-card"
-                    onClick={() => navigate(`/triage/${cc.case_id}`)}
-                    style={{ cursor: 'pointer' }}
+                    onClick={() => cc.url && window.open(cc.url, '_blank', 'noopener,noreferrer')}
+                    style={{ cursor: cc.url ? 'pointer' : 'default' }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--blue)' }}>
+                        {signalLabel(cc.source)}
+                      </span>
                       <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, fontWeight: 700, color: 'var(--teal)' }}>
                         {cc.case_id}
                       </span>
                       <span style={{ fontSize: 11, fontWeight: 700, color: cc.severity === 'Critical' ? 'var(--red)' : cc.severity === 'High' ? '#D97706' : 'var(--text2)' }}>
                         {cc.severity}
                       </span>
-                      <span style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.customer}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.customer_name || cc.customer}</span>
                     </div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{cc.title}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{cc.summary || cc.title}</div>
                     {cc.impact && (
                       <div style={{ fontSize: 11, color: 'var(--text3)' }}>{cc.impact.slice(0, 120)}</div>
+                    )}
+                    {cc.url && (
+                      <a href={cc.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--blue)' }} onClick={(e) => e.stopPropagation()}>
+                        Open signal
+                      </a>
                     )}
                   </div>
                 ))}

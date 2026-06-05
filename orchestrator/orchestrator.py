@@ -9,7 +9,12 @@ from .db.repositories.pipeline_context import (
     update_pipeline_step, delete_pipeline_context, get_steps_to_run,
 )
 from .db.repositories.audit_log import insert_audit_entry
-from .redis_client import get_redis, cache_case_result
+from .redis_client import (
+    get_redis,
+    cache_case_result,
+    store_panel_update,
+    publish_pipeline_done,
+)
 
 log = structlog.get_logger()
 
@@ -196,6 +201,10 @@ class TaskOrchestrator:
             except Exception:
                 pass
 
+            group_id = await self._persist_related_group(context)
+            if group_id:
+                context["group_id"] = group_id
+
         if "ai_synthesis" in steps_to_run:
             missing = self._missing_ai_requirements(context)
             if missing:
@@ -266,6 +275,8 @@ class TaskOrchestrator:
                     "status": (context.get("primary_ticket") or {}).get("status", ""),
                     "used_fallback": synthesis.get("used_fallback", False),
                     "group_id": context.get("group_id"),
+                    "related_tickets": self._audit_related_tickets(
+                        context.get("related_tickets") or []),
                 },
                 "systems_queried": context.get("sources_queried", []),
                 "duration_ms": total_ms,
@@ -296,21 +307,15 @@ class TaskOrchestrator:
                               agent: str = "",
                               status: str = "completed") -> None:
         try:
-            from .redis_client import get_redis
-            import json
-            r = await get_redis()
-            message = json.dumps({
-                "panel": panel_name,
-                "agent": agent,
-                "status": status,
-                "data": data,
-            })
-
-            # Persist for late WebSocket connections
-            await r.setex(
-                f"panel:{case_id}:{panel_name}", 3600, message)
-            await r.rpush(f"panels:{case_id}", panel_name)
-            await r.expire(f"panels:{case_id}", 3600)
+            from .redis_client import get_redis as _get_redis
+            r = await _get_redis()
+            message = await store_panel_update(
+                case_id=case_id,
+                panel_name=panel_name,
+                data=data,
+                agent=agent,
+                status=status,
+            )
 
             # Publish to live listeners
             await r.publish(f"ws:{case_id}", message)
@@ -328,28 +333,13 @@ class TaskOrchestrator:
                                  synthesis: dict,
                                  duration_ms: int) -> None:
         try:
-            from .redis_client import get_redis
-            import json
-            r = await get_redis()
-            message = json.dumps({
-                "type": "pipeline_complete",
-                "case_id": case_id,
-                "severity": synthesis.get("unified_severity"),
-                "confidence": synthesis.get("confidence"),
-                "group_id": synthesis.get("group_id"),
-                "duration_ms": duration_ms,
-            })
-
-            # Persist for late WebSocket connections
-            await r.setex(
-                f"panel:{case_id}:pipeline_complete",
-                3600, message)
-            await r.rpush(
-                f"panels:{case_id}", "pipeline_complete")
-            await r.expire(f"panels:{case_id}", 3600)
-
-            # Publish to live listeners
-            await r.publish(f"ws:{case_id}", message)
+            await publish_pipeline_done(
+                case_id=case_id,
+                status="completed",
+                duration_ms=duration_ms,
+                severity=synthesis.get("unified_severity"),
+                confidence=synthesis.get("confidence"),
+            )
 
         except Exception as e:
             log.warning("publish_complete failed", error=str(e))
@@ -378,3 +368,53 @@ class TaskOrchestrator:
 
     def _context_keys(self, context: dict) -> list[str]:
         return sorted(k for k in context.keys() if k != "errors")
+
+    async def _persist_related_group(self, context: dict) -> str | None:
+        primary = context.get("primary_ticket") or {}
+        related = context.get("related_tickets") or []
+        if not primary or not related:
+            return None
+        try:
+            from .db.repositories.group_registry import (
+                persist_related_issue_group)
+            async with AsyncSessionLocal() as db:
+                group_id = await persist_related_issue_group(
+                    db, primary, related)
+            if group_id:
+                log.info("Related issue group persisted",
+                         case_id=context.get("case_id"),
+                         group_id=group_id,
+                         related_count=len(related))
+            return group_id
+        except Exception as e:
+            log.warning("Related group persistence failed",
+                        case_id=context.get("case_id"),
+                        error=str(e))
+            return None
+
+    def _audit_related_tickets(self, related: list[dict]) -> list[dict]:
+        output = []
+        for item in related[:20]:
+            output.append({
+                "ticket_id": (
+                    item.get("ticket_id")
+                    or item.get("id")
+                    or item.get("key")
+                    or ""),
+                "source": (
+                    item.get("source")
+                    or item.get("system_type")
+                    or item.get("source_id")
+                    or ""),
+                "title": item.get("title", "")[:200],
+                "url": item.get("url", ""),
+                "status": item.get("status", ""),
+                "severity": item.get("severity", ""),
+                "similarity_score": (
+                    item.get("similarity_score")
+                    or item.get("relevance_score")),
+                "similarity_label": item.get("similarity_label", ""),
+                "similarity_reason": (
+                    item.get("similarity_reason", "")[:300]),
+            })
+        return output

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from orchestrator.db.base import Base
-from orchestrator.db.session import engine, AsyncSessionLocal
+from orchestrator.db.session import engine, AsyncSessionLocal, ensure_runtime_schema
 from orchestrator.db.models import (
     Base, SourceRegistry, CMDBTeamRegistry, SLAConfig, UserRole, CustomerCase,
     SystemGroupRegistry, BugGroupMapping
@@ -258,16 +258,127 @@ MOCK_CUSTOMER_CASES = [
     },
 ]
 
-
+ADDITIONAL_SOURCES = [
+    # More Apache JIRA projects — zero new code
+    {
+        "source_id": "apache-zookeeper-jira",
+        "display_name": "Apache ZooKeeper (JIRA)",
+        "system_type": "jira_apache",
+        "base_url": "https://issues.apache.org/jira",
+        "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
+        "project_key": "ZOOKEEPER",
+        "ticket_prefix": "ZOOKEEPER",
+        "enabled": True,
+    },
+    {
+        "source_id": "apache-cassandra-jira",
+        "display_name": "Apache Cassandra (JIRA)",
+        "system_type": "jira_apache",
+        "base_url": "https://issues.apache.org/jira",
+        "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
+        "project_key": "CASSANDRA",
+        "ticket_prefix": "CASSANDRA",
+        "enabled": True,
+    },
+    {
+        "source_id": "apache-beam-jira",
+        "display_name": "Apache Beam (JIRA)",
+        "system_type": "jira_apache",
+        "base_url": "https://issues.apache.org/jira",
+        "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
+        "project_key": "BEAM",
+        "ticket_prefix": "BEAM",
+        "enabled": True,
+    },
+    
+    # Jenkins JIRA — zero new code, same connector
+    {
+        "source_id": "jenkins-jira",
+        "display_name": "Jenkins (JIRA)",
+        "system_type": "jira_apache",
+        "base_url": "https://issues.jenkins.io",
+        "auth_secret_ref": "",
+        "project_key": "JENKINS",
+        "ticket_prefix": "JENKINS",
+        "enabled": True,
+    },
+    
+    # Red Hat JIRA — zero new code
+    {
+        "source_id": "redhat-jira-wildfly",
+        "display_name": "WildFly / JBoss (Red Hat JIRA)",
+        "system_type": "jira_apache",
+        "base_url": "https://issues.redhat.com",
+        "auth_secret_ref": "",
+        "project_key": "WFLY",
+        "ticket_prefix": "WFLY",
+        "enabled": True,
+    },
+    
+    # Linux Kernel Bugzilla — zero new code, same BugzillaConnector
+    {
+        "source_id": "linux-kernel-bugzilla",
+        "display_name": "Linux Kernel (Bugzilla)",
+        "system_type": "bugzilla",
+        "base_url": "https://bugzilla.kernel.org",
+        "auth_secret_ref": "",
+        "project_key": "Drivers",
+        "ticket_prefix": "BUG",
+        "enabled": True,
+    },
+    
+    # More GitHub repos — zero new code, same GithubConnector
+    {
+        "source_id": "elastic-elasticsearch-github",
+        "display_name": "Elasticsearch (GitHub)",
+        "system_type": "github",
+        "base_url": "https://api.github.com",
+        "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
+        "project_key": "elastic/elasticsearch",
+        "ticket_prefix": "ES",
+        "enabled": True,
+    },
+    {
+        "source_id": "netty-github",
+        "display_name": "Netty (GitHub)",
+        "system_type": "github",
+        "base_url": "https://api.github.com",
+        "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
+        "project_key": "netty/netty",
+        "ticket_prefix": "NGH",
+        "enabled": True,
+    },
+    {
+        "source_id": "grpc-java-github",
+        "display_name": "gRPC Java (GitHub)",
+        "system_type": "github",
+        "base_url": "https://api.github.com",
+        "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
+        "project_key": "grpc/grpc-java",
+        "ticket_prefix": "GRPC",
+        "enabled": True,
+    },
+    {
+        "source_id": "prometheus-github",
+        "display_name": "Prometheus (GitHub)",
+        "system_type": "github",
+        "base_url": "https://api.github.com",
+        "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
+        "project_key": "prometheus/prometheus",
+        "ticket_prefix": "PGH",
+        "enabled": True,
+    },
+]
 async def init():
     print("Creating database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_runtime_schema()
     print("Tables created.")
 
     async with AsyncSessionLocal() as db:
         print("\nSeeding data sources...")
-        for src_data in DEMO_SOURCES:
+        for src_data in DEMO_SOURCES + ADDITIONAL_SOURCES:
             existing = await db.execute(
                 select(SourceRegistry).where(SourceRegistry.source_id == src_data["source_id"])
             )

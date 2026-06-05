@@ -145,17 +145,23 @@ class CrossSystemFetchAgent(BaseAgent):
                 all_connectors=all_connectors)
             candidates.extend(live_results)
 
-        # Normalize ALL candidates to the standard shape and deduplicate by id
-        seen_ids: set[str] = set()
+        # Normalize ALL candidates, drop self-matches, and deduplicate by
+        # normalized source + ticket id before Panel 2 sees the payload.
+        primary_refs = self._primary_refs(primary)
+        seen_keys: set[tuple[str, str]] = set()
         normalized: list[dict] = []
         for c in candidates:
             n = self._normalize_candidate(c)
-            cid = n["id"]
-            if cid and cid not in seen_ids:
-                seen_ids.add(cid)
+            if self._is_primary_match(n, primary_refs):
+                continue
+            key = self._dedupe_key(n)
+            if key[1] and key not in seen_keys:
+                seen_keys.add(key)
                 normalized.append(n)
 
-        normalized.sort(key=lambda x: x["relevance_score"], reverse=True)
+        normalized.sort(
+            key=lambda x: x.get("similarity_score", 0.0),
+            reverse=True)
 
         context["related_tickets"]    = normalized
         context["sources_queried"]    = sources_queried
@@ -179,10 +185,11 @@ class CrossSystemFetchAgent(BaseAgent):
             raw.get("source") or
             raw.get("source_id") or "unknown"
         )
+        source_id = raw.get("source_id") or raw.get("source") or source
         # GitHub IDs are plain numbers from the API; prefix with # for display
         if ("github" in (source or "").lower()
                 and id_
-                and not str(id_).startswith("#")):
+                and str(id_).isdigit()):
             id_ = f"#{id_}"
 
         url = (
@@ -211,6 +218,7 @@ class CrossSystemFetchAgent(BaseAgent):
             "url":              url,
             "status":           status,
             "source":           source,
+            "source_id":        source_id,
             "system_type":      source,  # backward-compat alias
             "description":      (raw.get("description") or
                                  raw.get("body") or "")[:300],
@@ -219,7 +227,56 @@ class CrossSystemFetchAgent(BaseAgent):
             "similarity_label":  (raw.get("similarity_label") or ""),
             "similarity_reason": (raw.get("similarity_reason") or
                                   raw.get("reason") or ""),
+            "relationship_type": (raw.get("relationship_type") or
+                                  raw.get("relationship") or
+                                  raw.get("type") or ""),
+            "raw_key":          raw.get("raw_key") or raw.get("key") or "",
         }
+
+    def _normalize_ticket_ref(self, value) -> str:
+        text = str(value or "").strip().upper()
+        if text.startswith("#"):
+            text = text[1:]
+        return text
+
+    def _candidate_refs(self, item: dict) -> set[str]:
+        return {
+            self._normalize_ticket_ref(item.get(key))
+            for key in ("ticket_id", "id", "key", "raw_key")
+            if self._normalize_ticket_ref(item.get(key))
+        }
+
+    def _primary_refs(self, primary: dict) -> dict:
+        refs = {
+            self._normalize_ticket_ref(primary.get(key))
+            for key in ("ticket_id", "id", "key", "raw_key")
+            if self._normalize_ticket_ref(primary.get(key))
+        }
+        source_refs = {
+            self._normalize_ticket_ref(primary.get(key))
+            for key in ("source_id", "source", "system_type")
+            if self._normalize_ticket_ref(primary.get(key))
+        }
+        return {"ids": refs, "sources": source_refs}
+
+    def _is_primary_match(self, item: dict, primary_refs: dict) -> bool:
+        candidate_ids = self._candidate_refs(item)
+        if not candidate_ids:
+            return False
+        if candidate_ids & primary_refs["ids"]:
+            return True
+        source = self._normalize_ticket_ref(
+            item.get("source_id") or item.get("source") or item.get("system_type"))
+        return bool(
+            source
+            and source in primary_refs["sources"]
+            and candidate_ids & primary_refs["ids"])
+
+    def _dedupe_key(self, item: dict) -> tuple[str, str]:
+        source = self._normalize_ticket_ref(
+            item.get("source_id") or item.get("source") or item.get("system_type"))
+        refs = sorted(self._candidate_refs(item))
+        return source, refs[0] if refs else ""
 
     # ── Redis cache scan (Level 2) ────────────────────────────────
     async def _scan_redis_cache(self,

@@ -9,8 +9,8 @@ const toPercent = (score) => {
   return Math.min(Math.round(score * 100), 100)
 }
 
-const SRC_CLS = { github: 'sb-gh', jira_apache: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf', customer_portal: 'sb-jira' }
-const SRC_LBL = { github: 'GH', jira_apache: 'JIRA', bugzilla: 'BZ', confluence: 'CF', customer_portal: 'CP' }
+const SRC_CLS = { github: 'sb-gh', jira: 'sb-jira', jira_apache: 'sb-jira', jira_cloud: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf', customer_portal: 'sb-jira', support_kb: 'sb-cf' }
+const SRC_LBL = { github: 'GH', jira: 'JIRA', jira_apache: 'JIRA', jira_cloud: 'JIRA', bugzilla: 'BZ', confluence: 'CF', customer_portal: 'CP', support_kb: 'KB' }
 const SEV_CLS = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
 const SEVERITY_ORDER = ['P0', 'P1', 'P2', 'P3', 'Unknown']
 const ALL_SOURCES = ['All Sources', 'github', 'jira_apache', 'bugzilla']
@@ -21,6 +21,27 @@ function SevBadge({ sev }) {
 
 function SrcBadge({ type }) {
   return <span className={`sb ${SRC_CLS[type] || 'sb-jira'}`}>{SRC_LBL[type] || (type || '?').toUpperCase().slice(0, 4)}</span>
+}
+
+function getSourceType(item = {}) {
+  return (item.system_type || item.source || item.source_id || '').toLowerCase()
+}
+
+function getGroupRoot(group = {}) {
+  return group.root || group.primary || group.primary_bug || group.children?.[0] || null
+}
+
+function getGroupChildren(group = {}) {
+  if (group.root || group.primary || group.primary_bug) return group.children || []
+  return (group.children || []).slice(1)
+}
+
+function matchesPill(item, pill) {
+  if (pill === 'All') return true
+  if (pill === 'Untriaged') return !item?.is_triaged
+  if (pill === 'Triaged') return !!item?.is_triaged
+  if (pill === 'Critical') return item?.severity === 'P0' || item?.severity === 'P1'
+  return true
 }
 
 function fmtDate(iso) {
@@ -188,6 +209,97 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
   )
 }
 
+function GroupTreeRow({ group, onTriage, triaging }) {
+  const root = getGroupRoot(group)
+  const children = getGroupChildren(group)
+  const groupId = group.group_id || root?.ticket_id || group.id || 'group'
+  const [open, setOpen] = useState(false)
+
+  if (!root) return null
+
+  const sourceType = getSourceType(root)
+  const rootUrl = root.url || ''
+
+  return (
+    <div className="tree-group" style={{ border: '1px solid var(--border)', background: 'var(--white)' }}>
+      <div
+        className="tree-root"
+        style={{ border: 'none', borderRadius: 0 }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`expand-arrow${open ? ' open' : ''}`}>▶</span>
+        <span className="bt-badge">Root / Primary</span>
+        <SrcBadge type={sourceType} />
+        {rootUrl ? (
+          <a
+            className="raw-id"
+            href={rootUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {root.ticket_id}
+          </a>
+        ) : (
+          <span className="raw-id">{root.ticket_id}</span>
+        )}
+        <span className="bug-flat-title">{root.title || group.title || 'Grouped issue'}</span>
+        <SevBadge sev={root.severity || group.priority} />
+        <span className="bug-status-pill">{root.status || group.status || 'open'}</span>
+        <span className="match-badge match-m">{children.length} Related</span>
+        <button
+          className="btn btn-teal btn-sm"
+          onClick={(e) => { e.stopPropagation(); onTriage(root) }}
+          disabled={triaging === root.ticket_id}
+        >
+          {triaging === root.ticket_id ? '...' : '▶ Triage'}
+        </button>
+      </div>
+
+      {open && (
+        <div className="tree-children">
+          {children.length === 0 ? (
+            <div className="tree-child">
+              <span className="tree-connector">└─</span>
+              <span style={{ fontSize: 12, color: 'var(--text3)' }}>No related child rows in this group yet.</span>
+            </div>
+          ) : children.map((child, idx) => {
+            const childSource = getSourceType(child)
+            const childUrl = child.url || ''
+            return (
+              <div key={`${groupId}-${child.ticket_id || idx}`} className="tree-child">
+                <span className="tree-connector">└─</span>
+                <span className="match-badge match-l">Related</span>
+                <SrcBadge type={childSource} />
+                {childUrl ? (
+                  <a
+                    className="raw-id"
+                    href={childUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {child.ticket_id}
+                  </a>
+                ) : (
+                  <span className="raw-id">{child.ticket_id}</span>
+                )}
+                <span className="child-title">{child.title || 'Related issue'}</span>
+                <SevBadge sev={child.severity} />
+                <span className="bug-status-pill">{child.status || 'open'}</span>
+                {childUrl && (
+                  <a className="ext-btn" href={childUrl} target="_blank" rel="noopener noreferrer">
+                    ↗
+                  </a>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ─── Tree row for TRIAGED bugs — shows AI analysis as child ─── */
 function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   const [open, setOpen] = useState(false)
@@ -270,6 +382,8 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
 
 export default function BugListPage() {
   const [bugs,          setBugs]          = useState([])
+  const [groups,        setGroups]        = useState([])
+  const [flatRows,      setFlatRows]      = useState([])
   const [total,         setTotal]         = useState(0)
   const [page,          setPage]          = useState(1)
   const [loading,       setLoading]       = useState(true)
@@ -304,10 +418,15 @@ export default function BugListPage() {
     }
     try {
       const data = await getBugs({ page, severity, source: source || undefined, status, search })
-      // Backend returns a flat `bugs` array (ungrouped + group children).
-      // Fall back to `ungrouped` for older cached responses that predate this field.
-      const allBugs = data.bugs || [...(data.ungrouped || []), ...(data.groups || [])]
+      const nextGroups = data.groups || []
+      const allBugs = data.bugs || [
+        ...(data.ungrouped || []),
+        ...nextGroups.flatMap((g) => g.children || []),
+      ]
+      const nextFlatRows = nextGroups.length > 0 ? (data.ungrouped || []) : allBugs
       setBugs(allBugs)
+      setGroups(nextGroups)
+      setFlatRows(nextFlatRows)
       setTotal(data.total || 0)
       setSourcesOnline(data.sources_online || 0)
       setIsPartial(data.partial || false)
@@ -369,21 +488,20 @@ export default function BugListPage() {
 
   const syncMinsAgo = lastSynced ? Math.round((Date.now() - lastSynced) / 60000) : null
 
-  const visibleBugs = bugs.filter((b) => {
-    if (activePill === 'All')       return true
-    if (activePill === 'Untriaged') return !b.is_triaged
-    if (activePill === 'Triaged')   return b.is_triaged
-    if (activePill === 'Critical')  return b.severity === 'P0' || b.severity === 'P1'
-    return true
+  const visibleGroups = groups.filter((group) => {
+    const root = getGroupRoot(group)
+    return matchesPill(root || {}, activePill)
   })
+  const visibleFlatRows = flatRows.filter((b) => matchesPill(b, activePill))
 
   const triaged  = bugs.filter((b) => b.is_triaged).length
   const awaiting = bugs.length - triaged
   const start    = (page - 1) * 50 + 1
   const end      = Math.min((page - 1) * 50 + bugs.length, total)
 
-  const triagedBugs   = visibleBugs.filter((b) => b.is_triaged)
-  const untriagedBugs = visibleBugs.filter((b) => !b.is_triaged)
+  const triagedBugs   = visibleFlatRows.filter((b) => b.is_triaged)
+  const untriagedBugs = visibleFlatRows.filter((b) => !b.is_triaged)
+  const hasVisibleRows = visibleGroups.length > 0 || visibleFlatRows.length > 0
 
   return (
     <div>
@@ -581,7 +699,7 @@ export default function BugListPage() {
             }} />
           ))}
         </div>
-      ) : visibleBugs.length === 0 ? (
+      ) : !hasVisibleRows ? (
         (() => {
           const hasFilters = !!(search || severity || source || activePill !== 'All')
           if (hasFilters) {
@@ -609,6 +727,19 @@ export default function BugListPage() {
         })()
       ) : (
         <div>
+          {visibleGroups.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              {visibleGroups.map((group, idx) => (
+                <GroupTreeRow
+                  key={group.group_id || getGroupRoot(group)?.ticket_id || `group-${idx}`}
+                  group={group}
+                  onTriage={handleTriage}
+                  triaging={triagingId}
+                />
+              ))}
+            </div>
+          )}
+
           {/* Untriaged bugs first — flat expandable rows */}
           {untriagedBugs.map((bug, idx) => (
             <ExpandableBugRow

@@ -31,6 +31,8 @@ async def start_kafka_consumer():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with kafka_lifespan(app):
+        from orchestrator.db.session import ensure_runtime_schema
+        await ensure_runtime_schema()
         consumer_task = asyncio.create_task(start_kafka_consumer())
         app.state.consumer_task = consumer_task
         log.info("gateway_ready", host="0.0.0.0", port=8000)

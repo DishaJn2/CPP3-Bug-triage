@@ -37,6 +37,7 @@ class ContextFetchAgent(BaseAgent):
             )
             context["linked_items"]    = []
             context["customer_cases"]  = []
+            context["customer_signals"] = []
             context["source_references"] = []
             context["components"]      = []
             return context
@@ -74,6 +75,7 @@ class ContextFetchAgent(BaseAgent):
             )
             context["linked_items"]    = []
             context["customer_cases"]  = []
+            context["customer_signals"] = []
             context["source_references"] = []
             context["components"]      = []
             return context
@@ -124,35 +126,43 @@ class ContextFetchAgent(BaseAgent):
 
         # ── Fetch customer cases ──────────────────────────────────
         customer_cases = []
+        customer_signal_errors = []
         try:
             portals = await ConnectorRegistry.get_all_by_type(
                 "customer_portal")
             if portals:
                 q = (f"{ticket.title} "
-                     f"{ticket.component or ''}").strip()
+                     f"{ticket.component or ''} "
+                     f"{err or ''}").strip()
+                primary_signal_query = dataclasses.asdict(ticket)
+                primary_signal_query["description"] = desc or ""
+                primary_signal_query["error_excerpt"] = err or ""
                 gathered = await asyncio.gather(
                     *[
                         asyncio.wait_for(
-                            portal.search(q, max_results=3),
+                            portal.search(
+                                q,
+                                max_results=3,
+                                primary_ticket=primary_signal_query),
                             timeout=5.0)
                         for portal in portals
                     ],
                     return_exceptions=True,
                 )
                 results = []
-                for item in gathered:
+                for portal, item in zip(portals, gathered):
                     if isinstance(item, Exception):
+                        customer_signal_errors.append({
+                            "source": getattr(portal, "source_id", ""),
+                            "error": str(item)[:300],
+                        })
                         continue
+                    last_error = getattr(portal, "last_error", {}) or {}
+                    if last_error:
+                        customer_signal_errors.append(last_error)
                     results.extend(item)
                 customer_cases = [
-                    {
-                        "case_id":  t.ticket_id,
-                        "customer": t.reporter,
-                        "title":    t.title,
-                        "severity": t.severity,
-                        "impact":   t.description,
-                        "status":   t.status,
-                    }
+                    self._normalize_customer_signal(t)
                     for t in results
                 ]
                 log.info("ContextFetch: customer cases",
@@ -160,6 +170,10 @@ class ContextFetchAgent(BaseAgent):
                          portals=len(portals))
         except Exception as e:
             log.warning("ContextFetch: portal failed", err=str(e))
+            customer_signal_errors.append({
+                "source": "customer_portal",
+                "error": str(e)[:300],
+            })
 
         # ── Build context dict ────────────────────────────────────
         ticket_dict = self._normalize_ticket(
@@ -186,6 +200,8 @@ class ContextFetchAgent(BaseAgent):
         context["linked_items"]    = linked_items
         context["co_references"]   = co_refs
         context["customer_cases"]  = customer_cases
+        context["customer_signals"] = customer_cases
+        context["customer_signal_errors"] = customer_signal_errors
         context["source_references"] = source_references
         context["components"]      = (
             [ticket.component] if ticket.component else [])
@@ -243,8 +259,11 @@ class ContextFetchAgent(BaseAgent):
         )
         ticket_dict["recent_comments"] = self._recent_comments(
             ticket_dict.get("comments") or [])
-        ticket_dict["linked_items"] = linked_items or (
-            ticket_dict.get("linked_items") or [])
+        ticket_dict["linked_items"] = self._normalize_linked_items(
+            connector=connector,
+            linked_items=linked_items or (
+                ticket_dict.get("linked_items") or []),
+        )
         ticket_dict["source_id"] = connector.source_id
         ticket_dict["source"] = (
             ticket_dict.get("system_type") or connector.system_type)
@@ -283,6 +302,7 @@ class ContextFetchAgent(BaseAgent):
             "linked_items": ticket.get("linked_items", []),
             "url": ticket.get("url", ""),
             "customer_cases": customer_cases or [],
+            "customer_signals": customer_cases or [],
             "source_references": source_references or [],
             "errors": errors or {},
         }
@@ -314,9 +334,78 @@ class ContextFetchAgent(BaseAgent):
             "linked_items": [],
             "url": "",
             "customer_cases": [],
+            "customer_signals": [],
             "source_references": [],
             "errors": {self.step_name: error} if error else {},
         }
+
+    def _normalize_customer_signal(self, ticket) -> dict:
+        metadata = getattr(ticket, "signal_metadata", None)
+        if isinstance(metadata, dict):
+            signal = dict(metadata)
+        else:
+            signal = {
+                "case_id": ticket.ticket_id,
+                "source": getattr(ticket, "source_label", "") or ticket.system_type,
+                "customer_name": ticket.reporter,
+                "customer": ticket.reporter,
+                "severity": ticket.severity,
+                "status": ticket.status,
+                "summary": ticket.title,
+                "title": ticket.title,
+                "impact": ticket.description,
+                "url": ticket.url,
+                "linked_ticket_id": "",
+                "signal_score": getattr(ticket, "signal_score", 0.0),
+            }
+        signal.setdefault("case_id", ticket.ticket_id)
+        signal.setdefault("customer_name", ticket.reporter)
+        signal.setdefault("customer", signal.get("customer_name", ticket.reporter))
+        signal.setdefault("summary", ticket.title)
+        signal.setdefault("title", signal.get("summary", ticket.title))
+        signal.setdefault("impact", ticket.description)
+        signal.setdefault("url", ticket.url)
+        signal.setdefault("linked_ticket_id", "")
+        signal["signal_score"] = round(
+            max(0.0, min(float(signal.get("signal_score") or 0.0), 1.0)), 2)
+        return signal
+
+    def _normalize_linked_items(self, connector, linked_items: list) -> list:
+        normalized = []
+        for item in linked_items or []:
+            if not isinstance(item, dict):
+                continue
+            copy = dict(item)
+            copy["url"] = copy.get("url") or self._linked_item_url(
+                connector, copy)
+            normalized.append(copy)
+        return normalized
+
+    def _linked_item_url(self, connector, item: dict) -> str:
+        raw_id = (
+            item.get("raw_id")
+            or item.get("ticket_id")
+            or item.get("id")
+            or item.get("key")
+            or "")
+        raw_id = str(raw_id).strip()
+        if raw_id.startswith(("http://", "https://")):
+            return raw_id
+
+        system_type = (getattr(connector, "system_type", "") or "").lower()
+        base_url = (getattr(connector, "base_url", "") or "").rstrip("/")
+        if not raw_id or not base_url:
+            return ""
+
+        if "jira" in system_type:
+            return f"{base_url}/browse/{raw_id}"
+        if system_type == "github":
+            repo = getattr(connector, "project_key", "") or ""
+            if repo:
+                return f"https://github.com/{repo}/issues/{raw_id.lstrip('#')}"
+        if system_type == "bugzilla":
+            return f"{base_url}/show_bug.cgi?id={raw_id}"
+        return ""
 
     def _recent_comments(self, comments: list) -> list:
         if not isinstance(comments, list):
