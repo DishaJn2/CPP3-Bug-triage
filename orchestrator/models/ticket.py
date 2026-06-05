@@ -17,7 +17,10 @@ class TicketData:
     source_id: str
     system_type: str
     url: str = ""
+    api_url: str = ""
     error_excerpt: str = ""
+    steps_to_reproduce: str = ""
+    customer_impact: str = ""
     comments: list = field(default_factory=list)
     linked_items: list = field(default_factory=list)
     labels: list = field(default_factory=list)

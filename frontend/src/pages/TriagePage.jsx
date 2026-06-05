@@ -4,6 +4,12 @@ import { openTriageStream } from '../api/triage'
 import { getCaseResult } from '../api/bugs'
 
 /* ─── helpers ─── */
+const toPercent = (score) => {
+  if (score == null) return 0
+  if (score > 1) return Math.min(Math.round(score), 100)
+  return Math.min(Math.round(score * 100), 100)
+}
+
 const SEV_CLS = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
 const SRC_CLS = { github: 'sb-gh', jira_apache: 'sb-jira', bugzilla: 'sb-bz', confluence: 'sb-cf' }
 const SRC_LBL = { github: 'GH', jira_apache: 'JIRA', bugzilla: 'BZ', confluence: 'CF' }
@@ -126,22 +132,26 @@ function LoadingState({ caseId, panels, elapsed }) {
    RESULTS STATE
 ═══════════════════════════════════ */
 function ResultsState({ caseId, panels, elapsed, onBack }) {
+  const navigate = useNavigate()
   const ctx      = panels.bug_context   || {}
   const related  = panels.related_issues || {}
   const linked   = panels.linked_context || {}
   const aiPanel  = panels.ai_summary    || {}
 
-  // FIX 12: orchestrator now sends primary_ticket (was 'ticket')
-  const ticket   = ctx.primary_ticket   || {}
+  const ticket   = ctx.bug_context?.ticket_id
+    ? ctx.bug_context
+    : (ctx.primary_ticket || {})
   const synthesis = aiPanel.synthesis   || {}
 
-  const conf       = (synthesis.confidence || 0) * 100
+  const conf       = toPercent(synthesis.confidence)
   const sevBlockCls = { P0: 'p0-b', P1: 'p1-b', P2: 'p2-b', P3: 'p3-b' }[synthesis.unified_severity] || 'p3-b'
 
   const srcType   = ticket.system_type || ticket.source
   const caseShort = `BT-${caseId.slice(-5).toUpperCase()}`
 
-  const customerCases = ctx.customer_cases || linked.customer_cases || []
+  const customerCases = ticket.customer_cases || ctx.customer_cases || linked.customer_cases || []
+  const recentComments = ticket.recent_comments || ticket.comments || []
+  const linkedItems = ticket.linked_items || []
 
   return (
     <div className="fade-in">
@@ -168,25 +178,106 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             {srcType && <SrcBadge type={srcType} />}
           </div>
           <div className="panel-body scroll">
+            {ticket.ticket_id && <div className="meta-row"><span className="meta-k">Ticket ID</span> <span className="meta-v mono">{ticket.ticket_id}</span></div>}
+            {(ticket.source_name || srcType) && <div className="meta-row"><span className="meta-k">Source</span> <span className="meta-v">{ticket.source_name || srcType}</span></div>}
+            {ticket.title && <div className="meta-row"><span className="meta-k">Title</span> <span className="meta-v">{ticket.title}</span></div>}
             {ticket.status    && <div className="meta-row"><span className="meta-k">Status</span>    <span className="meta-v">{ticket.status}</span></div>}
             {ticket.severity  && <div className="meta-row"><span className="meta-k">Severity</span>  <SevBadge sev={ticket.severity} /></div>}
             {ticket.component && <div className="meta-row"><span className="meta-k">Component</span> <span className="meta-v">{ticket.component}</span></div>}
             {ticket.assignee  && <div className="meta-row"><span className="meta-k">Assignee</span>  <span className="meta-v">{ticket.assignee}</span></div>}
             {ticket.reporter  && <div className="meta-row"><span className="meta-k">Reporter</span>  <span className="meta-v">{ticket.reporter}</span></div>}
+            {ticket.updated_at && (
+              <div className="meta-row">
+                <span className="meta-k">Updated</span>
+                <span className="meta-v mono" style={{ fontSize: 11 }}>{new Date(ticket.updated_at).toLocaleString()}</span>
+              </div>
+            )}
             {ticket.created_at && (
               <div className="meta-row">
                 <span className="meta-k">Created</span>
                 <span className="meta-v mono" style={{ fontSize: 11 }}>{new Date(ticket.created_at).toLocaleDateString()}</span>
               </div>
             )}
+            {ticket.url && (
+              <div className="meta-row">
+                <span className="meta-k">URL</span>
+                <a className="meta-v" href={ticket.url} target="_blank" rel="noopener noreferrer">Open source ticket</a>
+              </div>
+            )}
 
             {ticket.description && (
               <>
                 <div className="panel-div" />
+                <div className="sec-label">DESCRIPTION</div>
                 <p className="desc-txt">
                   {ticket.description.slice(0, 500)}
                   {ticket.description.length > 500 ? '…' : ''}
                 </p>
+              </>
+            )}
+
+            {ticket.steps_to_reproduce && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">STEPS TO REPRODUCE</div>
+                <p className="desc-txt">{ticket.steps_to_reproduce}</p>
+              </>
+            )}
+
+            {ticket.error_excerpt && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">ERROR EXCERPT</div>
+                <pre className="desc-txt" style={{ whiteSpace: 'pre-wrap' }}>{ticket.error_excerpt}</pre>
+              </>
+            )}
+
+            {ticket.customer_impact && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">CUSTOMER IMPACT</div>
+                <p className="desc-txt">{ticket.customer_impact}</p>
+              </>
+            )}
+
+            {recentComments.length > 0 && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">RECENT COMMENTS</div>
+                {recentComments.map((comment, i) => (
+                  <div key={i} className="cust-card">
+                    <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 4 }}>
+                      {comment.author || comment.user || 'Comment'}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text)' }}>
+                      {(comment.body || comment.text || String(comment)).slice(0, 220)}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {linkedItems.length > 0 && (
+              <>
+                <div className="panel-div" />
+                <div className="sec-label">LINKED ITEMS</div>
+                {linkedItems.map((item, i) => (
+                  <div key={i} className="cust-card">
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>
+                      {item.raw_id || item.ticket_id || item.id || item.title || 'Linked item'}
+                    </div>
+                    {(item.type || item.relationship || item.source) && (
+                      <div style={{ fontSize: 11, color: 'var(--text3)' }}>
+                        {[item.type || item.relationship, item.source].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                    {item.url && (
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--blue)' }}>
+                        Open linked item
+                      </a>
+                    )}
+                  </div>
+                ))}
               </>
             )}
 
@@ -195,7 +286,12 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
                 <div className="panel-div" />
                 <div className="sec-label">RELATED CUSTOMER CASES</div>
                 {customerCases.map((cc, i) => (
-                  <div key={i} className="cust-card">
+                  <div
+                    key={i}
+                    className="cust-card"
+                    onClick={() => navigate(`/triage/${cc.case_id}`)}
+                    style={{ cursor: 'pointer' }}
+                  >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
                       <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, fontWeight: 700, color: 'var(--teal)' }}>
                         {cc.case_id}
@@ -222,52 +318,113 @@ function ResultsState({ caseId, panels, elapsed, onBack }) {
             <div className="panel-num pn-blue">02</div>
             <span className="panel-title">Related Issues</span>
             {(() => {
-              const tickets = related.related_tickets || []
-              const count   = tickets.length
-              if (!count) return <span className="panel-badge pb-blue">0 found</span>
-              const allWeak = tickets.every((t) => (t.similarity_score || 0) < 0.35)
-              return <span className="panel-badge pb-blue">
-                {allWeak ? `${count} weak match${count !== 1 ? 'es' : ''}` : `${count} found`}
-              </span>
+              const tickets = (related.related_tickets || []).filter(
+                (t) => (t.relevance_score || t.similarity_score || 0) >= 0.5
+              )
+              return (
+                <span className="panel-badge pb-blue">
+                  {tickets.length ? `${tickets.length} found` : '0 found'}
+                </span>
+              )
             })()}
           </div>
           <div className="panel-body scroll">
-            {!related.related_tickets?.length ? (
-              <p style={{ color: 'var(--text3)', fontSize: 13 }}>No related issues found above threshold.</p>
-            ) : related.related_tickets.map((t, i) => {
-              const score = t.similarity_score || 0
-              const pct   = (score * 100).toFixed(0)
-              const label = t.similarity_label || ''
-              const isWeak = score < 0.35 || label === 'Possible Match'
-              const isGood = !isWeak && (label === 'Good Match' || label === 'Excellent Match')
-              const barColor = isWeak ? 'var(--text3)' : isGood ? 'var(--teal)' : 'var(--orange)'
-              const reasonText = isWeak ? 'Weak semantic overlap — included for completeness' : t.similarity_reason
-              return (
-                <div key={i} className="issue-card">
-                  <div className="issue-top">
-                    {t.system_type && <SrcBadge type={t.system_type} />}
-                    <span className="mono" style={{ fontSize: 11, color: 'var(--text2)' }}>{t.ticket_id}</span>
-                    <span className="issue-name">{t.title}</span>
-                    {t.severity && <SevBadge sev={t.severity} />}
-                    {t.url && <a href={t.url} target="_blank" rel="noopener noreferrer" className="ext-btn">↗</a>}
-                  </div>
-                  <div className="sim-row">
-                    <div className="sim-bar">
-                      <div className="sim-fill" style={{ width: `${pct}%`, background: barColor }} />
-                    </div>
-                    <span className="sim-pct" style={{ color: barColor }}>{pct}% {label}</span>
-                  </div>
-                  {reasonText && (
-                    <p className="sim-reason" style={{ color: isWeak ? 'var(--text3)' : undefined }}>{reasonText}</p>
-                  )}
-                  {isWeak && (
-                    <p style={{ fontSize: 11, color: 'var(--text3)', fontStyle: 'italic', margin: '2px 0 0 0' }}>
-                      Low confidence match
-                    </p>
-                  )}
-                </div>
+            {(() => {
+              const tickets = (related.related_tickets || []).filter(
+                (t) => (t.relevance_score || t.similarity_score || 0) >= 0.5
               )
-            })}
+              if (!tickets.length) {
+                return (
+                  <p style={{ color: 'var(--text3)', fontSize: 13 }}>
+                    No related issues found across connected systems.
+                  </p>
+                )
+              }
+
+              // Source badge: full names, colored by system
+              const relBadge = (src) => {
+                const s = (src || '').toLowerCase()
+                if (s.includes('jira'))     return <span className="sb sb-jira">JIRA</span>
+                if (s.includes('github'))   return <span className="sb sb-gh">GitHub</span>
+                if (s.includes('bugzilla')) return <span className="sb sb-bz">Bugzilla</span>
+                return <span className="sb">{(src || '?').slice(0, 4).toUpperCase()}</span>
+              }
+
+              // Status pill: open=green, in progress=amber, closed=gray
+              const statusPill = (status) => {
+                const s = (status || '').toLowerCase()
+                const cfg = {
+                  open:           { color: '#0d9488', bg: '#f0fdfa' },
+                  'in progress':  { color: '#d97706', bg: '#fffbeb' },
+                  assigned:       { color: '#d97706', bg: '#fffbeb' },
+                  closed:         { color: 'var(--text3)', bg: 'var(--border)' },
+                  resolved:       { color: 'var(--text3)', bg: 'var(--border)' },
+                  done:           { color: 'var(--text3)', bg: 'var(--border)' },
+                }[s] || { color: 'var(--text3)', bg: 'var(--border)' }
+                if (!status || status === 'unknown') return null
+                return (
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, padding: '2px 7px',
+                    borderRadius: 10, background: cfg.bg, color: cfg.color,
+                    textTransform: 'capitalize', flexShrink: 0,
+                  }}>
+                    {status}
+                  </span>
+                )
+              }
+
+              return tickets.map((t, i) => {
+                const score    = t.relevance_score || t.similarity_score || 0
+                const pct      = toPercent(score)
+                const label    = t.similarity_label || ''
+                const isStrong = score >= 0.8
+                const barColor = isStrong ? 'var(--teal)' : 'var(--orange)'
+                const hasUrl   = t.url && t.url.startsWith('https://')
+                const title    = t.title || ''
+                const titleDisplay = title.length > 80
+                  ? title.slice(0, 80) + '…'
+                  : title
+
+                return (
+                  <div key={i} className="issue-card">
+                    <div className="issue-top">
+                      {relBadge(t.source || t.system_type)}
+                      {hasUrl ? (
+                        <a
+                          href={t.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mono"
+                          style={{ fontSize: 11, color: 'var(--blue)', flexShrink: 0 }}
+                        >
+                          {t.id || t.ticket_id}
+                        </a>
+                      ) : (
+                        <span className="mono" style={{ fontSize: 11, color: 'var(--text2)', flexShrink: 0 }}>
+                          {t.id || t.ticket_id}
+                        </span>
+                      )}
+                      <span className="issue-name" title={title}>{titleDisplay}</span>
+                      {statusPill(t.status)}
+                      {hasUrl && (
+                        <a href={t.url} target="_blank" rel="noopener noreferrer" className="ext-btn">↗</a>
+                      )}
+                    </div>
+                    <div className="sim-row">
+                      <div className="sim-bar">
+                        <div className="sim-fill" style={{ width: `${pct}%`, background: barColor }} />
+                      </div>
+                      {pct > 0 && (
+                        <span className="sim-pct" style={{ color: barColor }}>{pct}% {label}</span>
+                      )}
+                    </div>
+                    {t.similarity_reason && (
+                      <p className="sim-reason">{t.similarity_reason}</p>
+                    )}
+                  </div>
+                )
+              })
+            })()}
           </div>
         </div>
 
@@ -449,6 +606,12 @@ export default function TriagePage() {
   const cleanupRef = useRef(null)
 
   useEffect(() => {
+    setPanels({})
+    setComplete(false)
+    setError(null)
+    setElapsed(0)
+    startTime.current = Date.now()
+
     const timer = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTime.current) / 1000))
     }, 1000)
@@ -461,10 +624,12 @@ export default function TriagePage() {
             const ctx = cached.context || {}
             setPanels({
               bug_context: {
+                bug_context:    ctx.bug_context    || null,
                 primary_ticket: ctx.primary_ticket || null,
                 keywords:       ctx.keywords       || [],
                 components:     ctx.components     || [],
                 customer_cases: ctx.customer_cases || [],
+                source_references: ctx.source_references || [],
               },
               related_issues: {
                 related_tickets: ctx.related_tickets || [],
@@ -507,7 +672,7 @@ export default function TriagePage() {
       clearInterval(timer)
       if (cleanupRef.current) cleanupRef.current()
     }
-  }, [caseId])
+  }, [caseId, fromHistory])
 
   const handleBack = () => navigate('/bugs')
 
@@ -523,7 +688,7 @@ export default function TriagePage() {
         </div>
       )}
 
-      {complete ? (
+      {complete || panels.bug_context ? (
         <ResultsState caseId={caseId} panels={panels} elapsed={elapsed} onBack={handleBack} />
       ) : (
         <LoadingState caseId={caseId} panels={panels} elapsed={elapsed} />

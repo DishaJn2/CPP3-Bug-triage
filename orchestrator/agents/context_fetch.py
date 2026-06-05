@@ -30,14 +30,22 @@ class ContextFetchAgent(BaseAgent):
             self._add_error(context,
                 f"No connector resolved for bug_id={bug_id}")
             context["primary_ticket"]  = None
+            context["bug_context"]     = self._empty_bug_context(
+                bug_id=bug_id,
+                source_id=source_id,
+                error=context.get("errors", {}).get(self.step_name, ""),
+            )
             context["linked_items"]    = []
             context["customer_cases"]  = []
+            context["source_references"] = []
             context["components"]      = []
             return context
 
         log.info("ContextFetch: connector resolved",
                  connector=connector.source_id,
-                 ctype=type(connector).__name__)
+                 ctype=type(connector).__name__,
+                 ticket_id=bug_id,
+                 source_id=source_id)
 
         # ── Fetch primary ticket ──────────────────────────────────
         ticket = None
@@ -56,8 +64,17 @@ class ContextFetchAgent(BaseAgent):
             log.error("ContextFetch: ticket is None",
                       bug_id=bug_id, connector=connector.source_id)
             context["primary_ticket"]  = None
+            context["bug_context"]     = self._empty_bug_context(
+                bug_id=bug_id,
+                source_id=connector.source_id,
+                error=context.get("errors", {}).get(
+                    self.step_name,
+                    f"No ticket returned for {bug_id}",
+                ),
+            )
             context["linked_items"]    = []
             context["customer_cases"]  = []
+            context["source_references"] = []
             context["components"]      = []
             return context
 
@@ -65,7 +82,9 @@ class ContextFetchAgent(BaseAgent):
                  id=ticket.ticket_id,
                  title=(ticket.title or "")[:60],
                  severity=ticket.severity,
-                 component=ticket.component)
+                 component=ticket.component,
+                 selected_connector_source_id=connector.source_id,
+                 get_ticket_returned_title=bool(ticket.title))
 
         # ── Truncate oversized fields ─────────────────────────────
         desc = ticket.description or ""
@@ -143,17 +162,31 @@ class ContextFetchAgent(BaseAgent):
             log.warning("ContextFetch: portal failed", err=str(e))
 
         # ── Build context dict ────────────────────────────────────
-        ticket_dict = dataclasses.asdict(ticket)
-        ticket_dict["description"]   = desc
-        ticket_dict["error_excerpt"] = err
-        # Normalized aliases so downstream agents don't need to know field spellings
-        ticket_dict["id"]     = ticket_dict["ticket_id"]
-        ticket_dict["source"] = ticket_dict["system_type"]
+        ticket_dict = self._normalize_ticket(
+            ticket=ticket,
+            connector=connector,
+            description=desc,
+            error_excerpt=err,
+            linked_items=linked_items,
+        )
+        source_references = self._build_source_references(
+            ticket=ticket,
+            linked_items=linked_items,
+            co_refs=co_refs,
+        )
+        bug_context = self._build_bug_context(
+            ticket=ticket_dict,
+            customer_cases=customer_cases,
+            source_references=source_references,
+            errors=context.get("errors") or {},
+        )
 
         context["primary_ticket"]  = ticket_dict
+        context["bug_context"]     = bug_context
         context["linked_items"]    = linked_items
         context["co_references"]   = co_refs
         context["customer_cases"]  = customer_cases
+        context["source_references"] = source_references
         context["components"]      = (
             [ticket.component] if ticket.component else [])
         context["source_id"]       = connector.source_id
@@ -188,6 +221,138 @@ class ContextFetchAgent(BaseAgent):
             return None
 
         return None
+
+    def _normalize_ticket(self,
+                          ticket,
+                          connector,
+                          description: str,
+                          error_excerpt: str,
+                          linked_items: list) -> dict:
+        ticket_dict = dataclasses.asdict(ticket)
+        ticket_dict["description"] = description or ""
+        ticket_dict["error_excerpt"] = error_excerpt or ""
+        ticket_dict["steps_to_reproduce"] = (
+            ticket_dict.get("steps_to_reproduce")
+            or getattr(ticket, "steps_to_reproduce", "")
+            or ""
+        )
+        ticket_dict["customer_impact"] = (
+            ticket_dict.get("customer_impact")
+            or getattr(ticket, "customer_impact", "")
+            or ""
+        )
+        ticket_dict["recent_comments"] = self._recent_comments(
+            ticket_dict.get("comments") or [])
+        ticket_dict["linked_items"] = linked_items or (
+            ticket_dict.get("linked_items") or [])
+        ticket_dict["source_id"] = connector.source_id
+        ticket_dict["source"] = (
+            ticket_dict.get("system_type") or connector.system_type)
+        ticket_dict["system_type"] = (
+            ticket_dict.get("system_type") or connector.system_type)
+        ticket_dict["source_name"] = getattr(
+            connector, "display_name", connector.source_id)
+        ticket_dict["id"] = ticket_dict.get("ticket_id", "")
+        return ticket_dict
+
+    def _build_bug_context(self,
+                           ticket: dict,
+                           customer_cases: list,
+                           source_references: list,
+                           errors: dict) -> dict:
+        return {
+            "ticket_id": ticket.get("ticket_id", ""),
+            "source_id": ticket.get("source_id", ""),
+            "source": ticket.get("source", ""),
+            "source_name": ticket.get("source_name", ""),
+            "system_type": ticket.get("system_type", ""),
+            "title": ticket.get("title", ""),
+            "severity": ticket.get("severity", ""),
+            "status": ticket.get("status", ""),
+            "component": ticket.get("component", ""),
+            "assignee": ticket.get("assignee", ""),
+            "reporter": ticket.get("reporter", ""),
+            "created_at": ticket.get("created_at", ""),
+            "updated_at": ticket.get("updated_at", ""),
+            "description": ticket.get("description", ""),
+            "steps_to_reproduce": ticket.get("steps_to_reproduce", ""),
+            "error_excerpt": ticket.get("error_excerpt", ""),
+            "customer_impact": ticket.get("customer_impact", ""),
+            "recent_comments": ticket.get("recent_comments", []),
+            "comments": ticket.get("comments", []),
+            "linked_items": ticket.get("linked_items", []),
+            "url": ticket.get("url", ""),
+            "customer_cases": customer_cases or [],
+            "source_references": source_references or [],
+            "errors": errors or {},
+        }
+
+    def _empty_bug_context(self,
+                           bug_id: str,
+                           source_id: str = "",
+                           error: str = "") -> dict:
+        return {
+            "ticket_id": bug_id or "",
+            "source_id": source_id or "",
+            "source": "",
+            "source_name": "",
+            "system_type": "",
+            "title": "",
+            "severity": "",
+            "status": "",
+            "component": "",
+            "assignee": "",
+            "reporter": "",
+            "created_at": "",
+            "updated_at": "",
+            "description": "",
+            "steps_to_reproduce": "",
+            "error_excerpt": "",
+            "customer_impact": "",
+            "recent_comments": [],
+            "comments": [],
+            "linked_items": [],
+            "url": "",
+            "customer_cases": [],
+            "source_references": [],
+            "errors": {self.step_name: error} if error else {},
+        }
+
+    def _recent_comments(self, comments: list) -> list:
+        if not isinstance(comments, list):
+            return []
+        return comments[-3:]
+
+    def _build_source_references(self,
+                                 ticket,
+                                 linked_items: list,
+                                 co_refs: list) -> list:
+        references = []
+        for item in linked_items or []:
+            references.append({
+                "type": item.get("type") or item.get("relationship") or "linked_item",
+                "raw_id": item.get("raw_id") or item.get("ticket_id") or item.get("id") or "",
+                "source": item.get("source") or item.get("system_type") or "",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+            })
+        for item in getattr(ticket, "direct_reference_links", []) or []:
+            references.append({
+                "type": item.get("type") or item.get("relationship") or "direct_reference",
+                "raw_id": item.get("raw_id") or item.get("ticket_id") or item.get("id") or "",
+                "source": item.get("source") or item.get("system_type") or "",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+            })
+        for item in co_refs or []:
+            references.append({
+                "type": item.get("type") or "co_reference",
+                "raw_id": item.get("raw_id", ""),
+                "source": item.get("source", ""),
+                "title": "",
+                "url": item.get("url", ""),
+            })
+        return references
 
     # ── Deterministic co-reference extractor ─────────────────────
     def _extract_co_references(self, text: str) -> list:
