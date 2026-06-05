@@ -172,54 +172,23 @@ async def background_full_fetch(connector_list: list) -> None:
             if existing and len(existing) > 50:
                 continue
 
-            all_tickets = []
-            if connector.system_type == "github":
-                for pg in range(1, 6):
-                    batch = await asyncio.wait_for(
-                        connector.search(
-                            "", max_results=100, page=pg),
-                        timeout=12.0,
-                    )
-                    if not batch:
-                        break
-                    all_tickets.extend(batch)
-                    if len(batch) < 100:
-                        break
-                    await asyncio.sleep(0.5)
-            elif connector.system_type in ("jira", "jira_apache"):
-                for start_at in range(0, 300, 50):
-                    batch = await asyncio.wait_for(
-                        connector.search(
-                            "", max_results=50,
-                            start_at=start_at),
-                        timeout=12.0,
-                    )
-                    if not batch:
-                        break
-                    all_tickets.extend(batch)
-                    if len(batch) < 50:
-                        break
-                    await asyncio.sleep(0.5)
-            elif connector.system_type == "bugzilla":
-                for offset in range(0, 2000, 500):
-                    batch = await asyncio.wait_for(
-                        connector.search(
-                            "", max_results=500, offset=offset),
-                        timeout=15.0,
-                    )
-                    if not batch:
-                        break
-                    all_tickets.extend(batch)
-                    if len(batch) < 500:
-                        break
-                    await asyncio.sleep(0.5)
+            all_tickets = await asyncio.wait_for(
+                connector.search_open_bugs(
+                    status="open",
+                    severity="",
+                    max_results=300,
+                ),
+                timeout=20.0,
+            )
 
             if all_tickets:
-                data = [dataclasses.asdict(t)
-                        for t in all_tickets]
+                data = [
+                    _normalize_list_bug(ticket, connector)
+                    for ticket in all_tickets
+                ]
                 await cache_buglist(
                     connector.source_id, "open", "",
-                    data, ttl=300)
+                    data, ttl=120)
                 print(
                     f"[BackgroundFetch] {connector.source_id}: "
                     f"{len(data)} bugs cached", flush=True)
@@ -309,95 +278,116 @@ def get_bug_score(severity: str, updated_at: str) -> float:
     return sev_val * 10 + (ts / 2000000000.0)
 
 
+def _normalize_list_bug(ticket, connector) -> dict:
+    if dataclasses.is_dataclass(ticket):
+        data = dataclasses.asdict(ticket)
+    elif isinstance(ticket, dict):
+        data = dict(ticket)
+    else:
+        data = {
+            "ticket_id": getattr(ticket, "ticket_id", ""),
+            "title": getattr(ticket, "title", ""),
+            "severity": getattr(ticket, "severity", ""),
+            "status": getattr(ticket, "status", ""),
+            "assignee": getattr(ticket, "assignee", ""),
+            "updated_at": getattr(ticket, "updated_at", ""),
+            "url": getattr(ticket, "url", ""),
+        }
+
+    ticket_id = data.get("ticket_id") or data.get("id") or ""
+    system_type = data.get("system_type") or connector.system_type
+    source_id = data.get("source_id") or connector.source_id
+    base_url = getattr(connector, "base_url", "")
+    return {
+        "ticket_id": ticket_id,
+        "source": system_type,
+        "source_id": source_id,
+        "system_type": system_type,
+        "source_display_name": getattr(
+            connector, "display_name", connector.source_id),
+        "title": data.get("title", ""),
+        "severity": data.get("severity") or "Unknown",
+        "status": data.get("status") or "open",
+        "assignee": data.get("assignee", ""),
+        "updated_at": data.get("updated_at", ""),
+        "url": sanitize_bug_url(
+            url=data.get("url", ""),
+            system_type=system_type,
+            bug_id=ticket_id,
+            base_url=base_url,
+        ),
+    }
+
+
+async def _fetch_buglist_for_connector(
+        connector,
+        status: str,
+        severity: str,
+        max_results: int) -> dict:
+    cached = await get_cached_buglist(
+        connector.source_id, status, severity)
+    if cached is not None:
+        return {
+            "source_id": connector.source_id,
+            "bugs": cached,
+            "cache_status": "hit",
+            "error": None,
+        }
+
+    try:
+        tickets = await asyncio.wait_for(
+            connector.search_open_bugs(
+                status=status,
+                severity=severity,
+                max_results=max_results,
+            ),
+            timeout=20.0,
+        )
+        bugs = [
+            _normalize_list_bug(ticket, connector)
+            for ticket in (tickets or [])
+        ]
+        await cache_buglist(
+            connector.source_id, status, severity, bugs, ttl=120)
+        return {
+            "source_id": connector.source_id,
+            "bugs": bugs,
+            "cache_status": "miss",
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "source_id": connector.source_id,
+            "bugs": [],
+            "cache_status": "error",
+            "error": {
+                "source_id": connector.source_id,
+                "system_type": connector.system_type,
+                "message": str(e)[:300],
+            },
+        }
+
+
 async def _background_fetch_connector(connector) -> None:
     try:
-        connector_class = type(connector).__name__.lower()
-        tickets = []
-
-        if "jira" in connector_class:
-            for start_at in [0, 100, 200]:
-                try:
-                    batch = await asyncio.wait_for(
-                        connector.search(
-                            "", max_results=100,
-                            start_at=start_at),
-                        timeout=8.0)
-                    if not batch:
-                        break
-                    tickets.extend(batch)
-                    if len(batch) < 100:
-                        break
-                except (asyncio.TimeoutError, Exception):
-                    break
-
-        elif "github" in connector_class:
-            for page in [1, 2, 3]:
-                try:
-                    batch = await asyncio.wait_for(
-                        connector.search(
-                            "", max_results=100, page=page),
-                        timeout=8.0)
-                    if not batch:
-                        break
-                    tickets.extend(batch)
-                    if len(batch) < 100:
-                        break
-                except (asyncio.TimeoutError, Exception):
-                    break
-
-        elif "bugzilla" in connector_class:
-            try:
-                tickets = await asyncio.wait_for(
-                    connector.search("", max_results=300),
-                    timeout=8.0)
-            except (asyncio.TimeoutError, Exception):
-                tickets = []
-
-        else:
-            try:
-                tickets = await asyncio.wait_for(
-                    connector.search("", max_results=50),
-                    timeout=5.0)
-            except (asyncio.TimeoutError, Exception):
-                tickets = []
+        tickets = await asyncio.wait_for(
+            connector.search_open_bugs(
+                status="open",
+                severity="",
+                max_results=300,
+            ),
+            timeout=20.0,
+        )
 
         if tickets:
-            # Sanitize URLs at write time so every future cache read is clean
-            connector_base_url = getattr(connector, "base_url", "")
-            sanitized_data = []
-            for t in tickets:
-                t_dict = dataclasses.asdict(t)
-                t_dict["url"] = sanitize_bug_url(
-                    url=t_dict.get("url", ""),
-                    system_type=connector.system_type,
-                    bug_id=t_dict.get("ticket_id", ""),
-                    base_url=connector_base_url,
-                )
-                sanitized_data.append(t_dict)
+            sanitized_data = [
+                _normalize_list_bug(ticket, connector)
+                for ticket in tickets
+            ]
 
             await cache_buglist(
                 connector.source_id, "open", "",
-                sanitized_data, ttl=300)
-
-            from orchestrator.redis_client import get_redis
-            r = await get_redis()
-            for t_dict in sanitized_data:
-                bug_id = t_dict.get("ticket_id", "")
-                if not bug_id:
-                    continue
-                await r.hset(
-                    f"bug:data:{bug_id}", "data",
-                    json.dumps(t_dict))
-                await r.expire(f"bug:data:{bug_id}", 300)
-
-                score = get_bug_score(
-                    t_dict.get("severity"), t_dict.get("updated_at"))
-                await r.zadd(
-                    "buglist:all:scores", {bug_id: score})
-
-            await r.expire("buglist:all:scores", 300)
-            await r.set(
-                "buglist:last_refreshed", str(time.time()), ex=300)
+                sanitized_data, ttl=120)
 
             print(f"[BugList] {connector.source_id}: "
                   f"{len(sanitized_data)} bugs cached")
@@ -426,6 +416,11 @@ async def get_bugs(
         c for c in all_connectors
         if c.system_type in _BUG_SOURCE_TYPES
     ]
+    if source:
+        connectors = [
+            c for c in connectors
+            if c.source_id == source or c.system_type == source
+        ]
 
     if not connectors:
         return {
@@ -433,71 +428,45 @@ async def get_bugs(
             "total": 0, "page": page,
             "page_size": page_size, "sources_online": 0,
             "sources_total": 0, "partial": False,
+            "bugs": [],
+            "source_errors": [],
             "message": "No connectors configured",
         }
 
-    from orchestrator.redis_client import get_redis
-    r = await get_redis()
-
-    # Assembled-list cache (TTL 30 s, keyed on all filter dims)
-    cache_key = (
-        f"bug_list:{page}:{page_size}:{sort_field}:{sort_order}"
-        f":{search}:{severity}:{source}:{status}"
+    fetch_status = status or "open"
+    fetch_severity = severity or ""
+    max_results = max(page * page_size, 100)
+    fetch_results = await asyncio.gather(
+        *[
+            _fetch_buglist_for_connector(
+                connector=c,
+                status=fetch_status,
+                severity=fetch_severity,
+                max_results=max_results,
+            )
+            for c in connectors
+        ],
+        return_exceptions=True,
     )
-    try:
-        cached = await r.get(cache_key)
-        if cached:
-            data = json.loads(cached)
-            if "cache_status" not in data:
-                data["cache_status"] = "hit"
-            if "bugs" not in data:
-                data["bugs"] = (
-                    data.get("ungrouped", []) + [
-                        child
-                        for group in data.get("groups", [])
-                        for child in group.get("children", [])
-                    ]
-                )
-            return data
-    except Exception:
-        pass
-
-    # Fetch bug IDs from ZSET then bulk-fetch data hashes
-    bug_ids = await r.zrevrange("buglist:all:scores", 0, -1)
-
-    # Cold start: nothing in cache yet — fire background fetch and return immediately
-    if not bug_ids:
-        sources_online = len(connectors)
-        for c in connectors:
-            asyncio.create_task(_background_fetch_connector(c))
-        return {
-            "bugs": [],
-            "ungrouped": [],
-            "groups": [],
-            "total": 0,
-            "page": page,
-            "page_size": page_size,
-            "sources_online": sources_online,
-            "sources_total": len(connectors),
-            "partial": False,
-            "cache_status": "cold",
-            "cached_at": None,
-        }
 
     all_bugs = []
-    if bug_ids:
-        pipe = r.pipeline()
-        for bid in bug_ids:
-            pipe.hget(f"bug:data:{bid}", "data")
-        results = await pipe.execute()
-        for res in results:
-            if res:
-                try:
-                    all_bugs.append(json.loads(res))
-                except Exception:
-                    pass
+    source_errors = []
+    cache_statuses = []
+    for connector, result in zip(connectors, fetch_results):
+        if isinstance(result, Exception):
+            source_errors.append({
+                "source_id": connector.source_id,
+                "system_type": connector.system_type,
+                "message": str(result)[:300],
+            })
+            continue
 
-    sources_online = len(connectors)
+        all_bugs.extend(result.get("bugs") or [])
+        cache_statuses.append(result.get("cache_status", "miss"))
+        if result.get("error"):
+            source_errors.append(result["error"])
+
+    sources_online = len(connectors) - len(source_errors)
 
     # Filters
     if search:
@@ -511,6 +480,8 @@ async def get_bugs(
             if sl in (b.get("component") or "").lower():
                 return True
             if sl in (b.get("source_id") or "").lower():
+                return True
+            if sl in (b.get("source_display_name") or "").lower():
                 return True
             if sl in (b.get("system_type") or "").lower():
                 return True
@@ -531,12 +502,6 @@ async def get_bugs(
         all_bugs = [
             b for b in all_bugs
             if b.get("severity", "") == severity
-        ]
-    if source:
-        all_bugs = [
-            b for b in all_bugs
-            if b.get("source_id", "") == source
-            or b.get("system_type", "") == source
         ]
     if status:
         all_bugs = [
@@ -573,13 +538,14 @@ async def get_bugs(
         for child in group.get("children", [])
     ]
 
-    cached_at = None
-    try:
-        ts = await r.get("buglist:last_refreshed")
-        if ts:
-            cached_at = float(ts)
-    except Exception:
-        pass
+    if not cache_statuses:
+        cache_status = "error"
+    elif all(s == "hit" for s in cache_statuses):
+        cache_status = "hit"
+    elif any(s == "hit" for s in cache_statuses):
+        cache_status = "partial"
+    else:
+        cache_status = "miss"
 
     response = {
         **assembled,
@@ -589,18 +555,11 @@ async def get_bugs(
         "page_size":     page_size,
         "sources_online": sources_online,
         "sources_total": len(connectors),
-        "partial":       False,
-        "cache_status":  "hit",
-        "cached_at":     cached_at,
+        "partial":       bool(source_errors),
+        "source_errors": source_errors,
+        "cache_status":  cache_status,
+        "cached_at":     time.time(),
     }
-
-    # Cache assembled response (TTL 30 s)
-    try:
-        await r.setex(
-            cache_key, 30,
-            json.dumps(response, default=str))
-    except Exception:
-        pass
 
     return response
 

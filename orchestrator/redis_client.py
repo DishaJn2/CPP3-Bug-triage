@@ -8,6 +8,13 @@ load_dotenv()
 
 log = structlog.get_logger()
 _redis_client = None
+BUGLIST_CACHE_TTL_SECONDS = 120
+
+
+def buglist_cache_key(source_id: str, status: str, severity: str) -> str:
+    severity_key = severity or "all"
+    status_key = status or "open"
+    return f"buglist:{source_id}:{status_key}:{severity_key}"
 
 
 async def get_redis() -> aioredis.Redis:
@@ -37,10 +44,10 @@ async def get_cached_ticket(source_id: str, ticket_id: str) -> dict | None:
         return None
 
 
-async def cache_buglist(source_id: str, status: str, severity: str, data: list, ttl: int = 120) -> None:
+async def cache_buglist(source_id: str, status: str, severity: str, data: list, ttl: int = BUGLIST_CACHE_TTL_SECONDS) -> None:
     try:
         r = await get_redis()
-        key = f"buglist:{source_id}:{status}:{severity}"
+        key = buglist_cache_key(source_id, status, severity)
         await r.setex(key, ttl, json.dumps(data))
     except Exception as e:
         log.warning("cache_buglist failed", error=str(e))
@@ -49,7 +56,7 @@ async def cache_buglist(source_id: str, status: str, severity: str, data: list, 
 async def get_cached_buglist(source_id: str, status: str, severity: str) -> list | None:
     try:
         r = await get_redis()
-        key = f"buglist:{source_id}:{status}:{severity}"
+        key = buglist_cache_key(source_id, status, severity)
         val = await r.get(key)
         return json.loads(val) if val else None
     except Exception:
