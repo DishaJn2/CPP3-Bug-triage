@@ -64,15 +64,86 @@ function Dot({ color }) {
   )
 }
 
-function StatusIndicator({ conn }) {
-  if (!conn.enabled)
-    return <span style={{ display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--text3)' }}><Dot color="#9AA3B5" />Disabled</span>
-  if (conn.auth_type === 'none' || conn.system_type === 'jira_apache' || conn.system_type === 'bugzilla' ||
-      conn.system_type === 'confluence' || conn.system_type === 'customer_portal' || conn.system_type === 'support_kb')
-    return <span style={{ display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--green)' }}><Dot color="#166534" />Internal/Public</span>
-  if (conn.token_present)
-    return <span style={{ display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--green)' }}><Dot color="#166534" />Connected</span>
-  return <span style={{ display: 'flex', alignItems: 'center', fontSize: 12, color: 'var(--red)' }}><Dot color="#B91C1C" />No Token</span>
+const ACCESS_COLORS = {
+  Public: '#1A56A0',
+  Internal: '#7C3AED',
+  Authenticated: '#0A7C6E',
+}
+
+const HEALTH_COLORS = {
+  Connected: '#166534',
+  Disconnected: '#9AA3B5',
+  Error: '#B91C1C',
+  Timeout: '#D97706',
+}
+
+function FieldBadge({ label, value, color }) {
+  return (
+    <span style={{
+      display: 'flex', alignItems: 'center', gap: 5,
+      fontSize: 12, color: color || 'var(--text2)', whiteSpace: 'nowrap',
+    }}>
+      <span style={{ color: 'var(--text3)', fontWeight: 600 }}>{label}:</span>
+      <Dot color={color || '#9AA3B5'} />
+      <span style={{ fontWeight: 600 }}>{value}</span>
+    </span>
+  )
+}
+
+function AccessIndicator({ conn }) {
+  const access = normalizeAccessType(conn)
+  return <FieldBadge label="Access" value={access} color={ACCESS_COLORS[access] || '#9AA3B5'} />
+}
+
+function HealthIndicator({ conn, testRes }) {
+  const health = normalizeHealthStatus(testRes) || normalizeHealthStatus(conn) || inferLegacyHealth(conn)
+  return <FieldBadge label="Status" value={health} color={HEALTH_COLORS[health] || '#9AA3B5'} />
+}
+
+function normalizeAccessType(conn) {
+  if (conn.access_type) return conn.access_type
+  const authType = String(conn.auth_type || '').toLowerCase()
+  if (authType && authType !== 'none' && authType !== 'public') return 'Authenticated'
+  if (conn.token_present) return 'Authenticated'
+  const baseUrl = String(conn.base_url || '').toLowerCase()
+  if (
+    baseUrl.includes('localhost') ||
+    baseUrl.includes('127.') ||
+    baseUrl.includes('10.') ||
+    baseUrl.includes('192.168.') ||
+    baseUrl.includes('.internal') ||
+    baseUrl.includes('.corp') ||
+    baseUrl.includes('intranet') ||
+    baseUrl.includes('hpe') ||
+    baseUrl.includes('cpp3')
+  ) {
+    return 'Internal'
+  }
+  return 'Public'
+}
+
+function normalizeHealthStatus(record) {
+  if (!record) return ''
+  if (record.connected === true || record.is_connected === true) return 'Connected'
+  if (record.connected === false || record.is_connected === false) return 'Disconnected'
+  if (record.test_result) {
+    const nested = normalizeHealthStatus(record.test_result)
+    if (nested) return nested
+  }
+  const raw = String(record.health_status || record.status || '').toLowerCase()
+  if (['connected', 'ok', 'success', 'healthy'].includes(raw)) return 'Connected'
+  if (['disconnected', 'disabled', 'not_connected'].includes(raw)) return 'Disconnected'
+  if (raw === 'timeout') return 'Timeout'
+  if (['error', 'failed', 'failure'].includes(raw)) return 'Error'
+  return ''
+}
+
+function inferLegacyHealth(conn) {
+  if (!conn.enabled) return 'Disconnected'
+  if (conn.token_present || ['Public', 'Internal'].includes(normalizeAccessType(conn))) {
+    return 'Connected'
+  }
+  return 'Disconnected'
 }
 
 function RoleBadge({ role }) {
@@ -380,7 +451,10 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-                      <StatusIndicator conn={conn} />
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 156 }}>
+                        <AccessIndicator conn={conn} />
+                        <HealthIndicator conn={conn} testRes={testRes} />
+                      </div>
                       <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => handleTest(conn.source_id)}
@@ -409,7 +483,9 @@ export default function SettingsPage() {
                       color: testRes.status === 'ok' ? 'var(--green)' : 'var(--red)',
                       fontFamily: 'JetBrains Mono, monospace',
                     }}>
-                      {testRes.status === 'ok' ? `✓ ${testRes.message}` : `✗ ${testRes.message}`}
+                      {testRes.status === 'ok'
+                        ? `✓ ${testRes.health_status || 'Connected'} · ${testRes.message}`
+                        : `✗ ${testRes.health_status || 'Error'} · ${testRes.message}`}
                     </div>
                   )}
                   {editingId === conn.source_id && (

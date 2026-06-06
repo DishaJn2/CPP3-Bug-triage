@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import os
+from urllib.parse import urlparse
 from ..auth import get_current_user, User
 from orchestrator.db.session import AsyncSessionLocal
 from orchestrator.db.repositories.source_registry import (
@@ -47,10 +48,63 @@ class ConnectionUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
-def _format_source(s) -> dict:
+def _access_type_for_source(s, token_present: bool) -> str:
+    auth_type = (s.auth_type or "none").strip().lower()
+    if auth_type not in {"", "none", "public"}:
+        return "Authenticated"
+    if token_present:
+        return "Authenticated"
+
+    host = (urlparse(s.base_url or "").hostname or "").lower()
+    private_markers = (
+        "localhost",
+        "127.",
+        "10.",
+        "192.168.",
+        ".local",
+        ".internal",
+        ".corp",
+        "intranet",
+        "hpe",
+        "cpp3",
+    )
+    if any(marker in host for marker in private_markers):
+        return "Internal"
+    return "Public"
+
+
+def _health_status_from_result(result: dict | None, enabled: bool) -> str:
+    if not enabled:
+        return "Disconnected"
+    if not result:
+        return ""
+    if result.get("connected") is True or result.get("is_connected") is True:
+        return "Connected"
+    if result.get("connected") is False or result.get("is_connected") is False:
+        return "Disconnected"
+    nested = result.get("test_result") if isinstance(result.get("test_result"), dict) else {}
+    if nested:
+        nested_status = _health_status_from_result(nested, enabled)
+        if nested_status:
+            return nested_status
+    status = (result.get("status") or "").strip().lower()
+    if result.get("ok") is True or status in {"ok", "connected", "success", "healthy"}:
+        return "Connected"
+    if status in {"disconnected", "disabled", "not_connected"}:
+        return "Disconnected"
+    if status == "timeout":
+        return "Timeout"
+    if status in {"error", "failed", "failure"}:
+        return "Error"
+    return ""
+
+
+def _format_source(s, health: dict | None = None) -> dict:
     meta = SYSTEM_TYPE_LABELS.get(s.system_type, {"label": s.system_type, "icon": "?", "color": "gray"})
     token_env_var = s.auth_secret_ref or ""
     token_present = bool(os.environ.get(token_env_var, ""))
+    access_type = _access_type_for_source(s, token_present)
+    health_status = _health_status_from_result(health, s.enabled)
     return {
         "source_id":       s.source_id,
         "display_name":    s.display_name,
@@ -66,6 +120,10 @@ def _format_source(s) -> dict:
         "auth_secret_ref": token_env_var,
         "token_present":   token_present,
         "token_masked":    "••••••••" if token_present else "(not set — public API)",
+        "access_type":     access_type,
+        "health_status":   health_status,
+        "health_error":    (health or {}).get("error", ""),
+        "latency_ms":      (health or {}).get("latency_ms", 0),
         "enabled":         s.enabled,
         "created_at":      s.created_at.isoformat() if s.created_at else "",
     }
@@ -75,7 +133,25 @@ def _format_source(s) -> dict:
 async def list_connections(user: User = Depends(get_current_user)):
     async with AsyncSessionLocal() as db:
         sources = await get_all_sources(db)
-    connections = [_format_source(s) for s in sources]
+    health_by_source = {}
+    try:
+        import asyncio
+        health_results = await asyncio.wait_for(
+            ConnectorRegistry.health_check_all(timeout=3.0),
+            timeout=5.0,
+        )
+        health_by_source = {
+            item.get("source_id"): item
+            for item in health_results
+            if item.get("source_id")
+        }
+    except Exception:
+        health_by_source = {}
+
+    connections = [
+        _format_source(s, health_by_source.get(s.source_id))
+        for s in sources
+    ]
     return {
         "connections": connections,
         "total": len(connections),
@@ -292,12 +368,16 @@ async def test_connection(
             "source_id": source_id,
             "message": "Connected",
             "token_present": bool(token),
+            "health_status": "Connected",
             "latency_ms": health.get("latency_ms", 0),
         }
     except Exception as e:
+        message = str(e)[:300]
+        health_status = "Timeout" if "timeout" in message.lower() else "Error"
         return {
             "status": "error",
             "source_id": source_id,
-            "message": str(e)[:300],
+            "message": message,
             "token_present": bool(token),
+            "health_status": health_status,
         }
