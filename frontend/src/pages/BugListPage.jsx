@@ -141,6 +141,22 @@ function BugStatusPanel({ bugId, status, loading, onTriage, onView, triaging }) 
 }
 
 /* ─── Expandable flat row for UNTRIAGED bugs ─── */
+function StatusBadge({ status, loading, error }) {
+  if (loading) {
+    return <span className="bug-status-pill">Checking</span>
+  }
+  if (error) {
+    return <span className="bug-status-pill">Unknown</span>
+  }
+  if (status?.needs_retriage) {
+    return <span className="bug-status-pill" style={{ color: 'var(--orange)', borderColor: 'var(--orange-bd)', background: 'var(--orange-lt)' }}>Changes detected</span>
+  }
+  if (status && !status.is_new) {
+    return <span className="current-badge">✓ Current</span>
+  }
+  return <span className="bug-status-pill">Unknown</span>
+}
+
 function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
   const [expanded,      setExpanded]      = useState(false)
   const [status,        setStatus]        = useState(null)
@@ -303,11 +319,47 @@ function GroupTreeRow({ group, onTriage, triaging }) {
 /* ─── Tree row for TRIAGED bugs — shows AI analysis as child ─── */
 function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   const [open, setOpen] = useState(false)
+  const [status, setStatus] = useState(null)
+  const [statusLoading, setStatusLoading] = useState(false)
+  const [statusError, setStatusError] = useState(false)
   const triage = bug.triage_info || {}
   const confPct = triage.confidence != null ? toPercent(triage.confidence) : null
   const triagedAt = fmtDate(triage.triaged_at)
   const caseIdShort = triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
   const systems = triage.systems_queried || []
+  const statusCaseId = status?.case_id || triage.case_id
+  const statusConfPct = status?.last_confidence != null ? toPercent(status.last_confidence) : confPct
+  const statusTriagedAt = fmtDate(status?.last_triaged_at || triage.triaged_at)
+
+  const fetchStatus = async () => {
+    setStatusLoading(true)
+    setStatusError(false)
+    try {
+      const s = await getBugStatus(bug.ticket_id)
+      setStatus({
+        ...s,
+        changes: (s.changes || []).map(formatChange),
+      })
+    } catch {
+      setStatus(null)
+      setStatusError(true)
+    } finally {
+      setStatusLoading(false)
+    }
+  }
+
+  const handleToggle = async () => {
+    const next = !open
+    setOpen(next)
+    if (next && !status && !statusLoading) {
+      await fetchStatus()
+    }
+  }
+
+  const handleView = (e) => {
+    e.stopPropagation()
+    if (statusCaseId) navigate(`/triage/${statusCaseId}?from=history`)
+  }
 
   return (
     <div style={{
@@ -318,7 +370,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
       <div
         className="bug-flat"
         style={{ borderRadius: 0, border: 'none', marginBottom: 0, cursor: 'pointer' }}
-        onClick={() => setOpen((v) => !v)}
+        onClick={handleToggle}
       >
         <span style={{
           fontSize: 10, color: 'var(--text3)', padding: '2px 4px', flexShrink: 0,
@@ -332,20 +384,81 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
         {confPct != null && (
           <span className="match-badge match-h">{confPct}%</span>
         )}
-        <span className="current-badge">✓ Current</span>
+        <StatusBadge status={status} loading={statusLoading} error={statusError} />
         <span className="bug-flat-time">{triagedAt}</span>
-        <button
-          className="btn btn-outline btn-sm"
-          onClick={(e) => { e.stopPropagation(); onRetriage(bug, true) }}
-          disabled={retriaging === bug.ticket_id}
-        >
-          {retriaging === bug.ticket_id ? '…' : 'Re-triage'}
-        </button>
+        {statusCaseId && (
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={handleView}
+          >
+            View Previous Results
+          </button>
+        )}
       </div>
 
       {/* Expanded children — AI analysis */}
       {open && (
         <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg)' }}>
+          {statusError ? (
+            <div style={{ padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 13, color: 'var(--text3)', fontWeight: 600 }}>Unknown</span>
+              <button className="btn btn-outline btn-sm" onClick={fetchStatus} disabled={statusLoading}>
+                {statusLoading ? '…' : 'Retry'}
+              </button>
+              {statusCaseId && (
+                <button className="btn btn-ghost btn-sm" onClick={handleView}>View Previous Results</button>
+              )}
+            </div>
+          ) : statusLoading ? (
+            <div style={{ padding: '12px 24px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="skeleton-pulse" style={{ width: 180, height: 13, borderRadius: 3 }} />
+              <div className="skeleton-pulse" style={{ width: 120, height: 13, borderRadius: 3 }} />
+            </div>
+          ) : status?.needs_retriage ? (
+            <div style={{ padding: '12px 24px' }}>
+              <div style={{
+                background: 'var(--orange-lt)', border: '1px solid var(--orange-bd)',
+                borderRadius: 7, padding: '9px 12px', marginBottom: 10, fontSize: 12, color: 'var(--orange)',
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ Changes detected</div>
+                {(status.changes || []).length > 0 ? (
+                  status.changes.map((c, i) => <div key={i} style={{ marginLeft: 8 }}>• {c}</div>)
+                ) : (
+                  <div style={{ marginLeft: 8 }}>Ticket metadata changed since last triage.</div>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace', marginBottom: 10 }}>
+                Last triaged: {statusTriagedAt}{statusConfPct != null ? ` · Confidence: ${statusConfPct}%` : ''}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {statusCaseId && (
+                  <button className="btn btn-outline btn-sm" onClick={handleView}>View Previous Results</button>
+                )}
+                <button
+                  className="btn btn-teal btn-sm"
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug, true) }}
+                  disabled={retriaging === bug.ticket_id}
+                >
+                  {retriaging === bug.ticket_id ? '…' : '▶ Run Fresh Triage'}
+                </button>
+              </div>
+            </div>
+          ) : status ? (
+            <div style={{ padding: '12px 24px' }}>
+              <div style={{ fontSize: 13, color: 'var(--green)', fontWeight: 600, marginBottom: 5 }}>
+                ✓ Current
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 6 }}>
+                No changes since last triage
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'JetBrains Mono, monospace', marginBottom: 10 }}>
+                Last triaged: {statusTriagedAt}{statusConfPct != null ? ` · Confidence: ${statusConfPct}%` : ''}
+              </div>
+              {statusCaseId && (
+                <button className="btn btn-outline btn-sm" onClick={handleView}>View Previous Results</button>
+              )}
+            </div>
+          ) : null}
           <div style={{
             marginLeft: 24, paddingLeft: 16, paddingTop: 10, paddingBottom: 10,
             borderLeft: '2px solid var(--border)', position: 'relative',
