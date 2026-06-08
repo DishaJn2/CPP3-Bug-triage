@@ -42,6 +42,17 @@ const FILTER_OPTIONS = [
 ]
 
 const ROLE_COLORS = { admin: '#B91C1C', engineer: '#1A56A0', customer: '#D97706', executive: '#166534' }
+const SETTINGS_CACHE_MAX_AGE_MS = 120000
+
+let settingsCache = {
+  connections: [],
+  byType: {},
+  users: [],
+  filter: 'all',
+  testResults: {},
+  lastFetchedConnections: 0,
+  lastFetchedUsers: 0,
+}
 
 const EMPTY_FORM = {
   display_name: '',
@@ -161,11 +172,13 @@ function RoleBadge({ role }) {
 
 export default function SettingsPage() {
   const { user }                                    = useAuth()
-  const [connections,    setConnections]            = useState([])
-  const [byType,         setByType]                 = useState({})
-  const [filter,         setFilter]                 = useState('all')
+  const [connections,    setConnections]            = useState(() => settingsCache.connections || [])
+  const [byType,         setByType]                 = useState(() => settingsCache.byType || {})
+  const [filter,         setFilter]                 = useState(() => settingsCache.filter || 'all')
   const [testing,        setTesting]                = useState({})
-  const [testResults,    setTestResults]            = useState({})
+  const [testResults,    setTestResults]            = useState(() => settingsCache.testResults || {})
+  const [connectionsLoading, setConnectionsLoading]  = useState(() => !(settingsCache.connections || []).length)
+  const [connectionsError,   setConnectionsError]    = useState('')
   const [showAddModal,   setShowAddModal]           = useState(false)
   const [addForm,        setAddForm]                = useState(EMPTY_FORM)
   const [addLoading,     setAddLoading]             = useState(false)
@@ -173,8 +186,9 @@ export default function SettingsPage() {
   const [toast,          setToast]                  = useState('')
 
   // User management state
-  const [users,          setUsers]                  = useState([])
+  const [users,          setUsers]                  = useState(() => settingsCache.users || [])
   const [usersLoading,   setUsersLoading]           = useState(false)
+  const [usersError,     setUsersError]             = useState('')
   const [showUserModal,  setShowUserModal]          = useState(false)
   const [userForm,       setUserForm]               = useState(EMPTY_USER_FORM)
   const [userLoading,    setUserLoading]            = useState(false)
@@ -190,27 +204,70 @@ export default function SettingsPage() {
 
   const isAdmin = user?.role === 'admin'
 
-  const fetchConnections = () => {
-    getConnections()
-      .then((data) => {
-        setConnections(data.connections || [])
-        setByType(data.by_type || {})
-      })
-      .catch(console.error)
+  const setCachedFilter = (nextFilter) => {
+    settingsCache.filter = nextFilter
+    setFilter(nextFilter)
   }
 
-  const fetchUsers = () => {
+  const fetchConnections = (background = false) => {
+    if (!background && connections.length === 0) setConnectionsLoading(true)
+    setConnectionsError('')
+    return getConnections()
+      .then((data) => {
+        const nextConnections = data.connections || []
+        const nextByType = data.by_type || {}
+        settingsCache.connections = nextConnections
+        settingsCache.byType = nextByType
+        settingsCache.lastFetchedConnections = Date.now()
+        setConnections(nextConnections)
+        setByType(nextByType)
+      })
+      .catch((err) => {
+        console.error(err)
+        setConnectionsError('Unable to load connections. Showing last known data if available.')
+      })
+      .finally(() => setConnectionsLoading(false))
+  }
+
+  const fetchUsers = (background = false) => {
     if (!isAdmin) return
-    setUsersLoading(true)
-    listUsers()
-      .then(setUsers)
-      .catch(console.error)
+    if (!background && users.length === 0) setUsersLoading(true)
+    setUsersError('')
+    return listUsers()
+      .then((data) => {
+        const nextUsers = data || []
+        settingsCache.users = nextUsers
+        settingsCache.lastFetchedUsers = Date.now()
+        setUsers(nextUsers)
+      })
+      .catch((err) => {
+        console.error(err)
+        setUsersError('Unable to load users. Showing last known data if available.')
+      })
       .finally(() => setUsersLoading(false))
   }
 
   useEffect(() => {
-    fetchConnections()
-    fetchUsers()
+    const hasCachedConnections = (settingsCache.connections || []).length > 0
+    const connectionsFresh = hasCachedConnections && (Date.now() - settingsCache.lastFetchedConnections < SETTINGS_CACHE_MAX_AGE_MS)
+    if (connectionsFresh) {
+      setConnections(settingsCache.connections)
+      setByType(settingsCache.byType || {})
+      setConnectionsLoading(false)
+    } else {
+      fetchConnections(hasCachedConnections)
+    }
+
+    if (isAdmin) {
+      const hasCachedUsers = (settingsCache.users || []).length > 0
+      const usersFresh = hasCachedUsers && (Date.now() - settingsCache.lastFetchedUsers < SETTINGS_CACHE_MAX_AGE_MS)
+      if (usersFresh) {
+        setUsers(settingsCache.users)
+        setUsersLoading(false)
+      } else {
+        fetchUsers(hasCachedUsers)
+      }
+    }
   }, [isAdmin])
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
@@ -219,12 +276,20 @@ export default function SettingsPage() {
     setTesting((p) => ({ ...p, [sourceId]: true }))
     try {
       const r = await testConnection(sourceId)
-      setTestResults((p) => ({ ...p, [sourceId]: r }))
+      setTestResults((p) => {
+        const next = { ...p, [sourceId]: r }
+        settingsCache.testResults = next
+        return next
+      })
     } catch (err) {
-      setTestResults((p) => ({
-        ...p,
-        [sourceId]: { status: 'error', message: err.response?.data?.detail || err.message || 'Connection failed' },
-      }))
+      setTestResults((p) => {
+        const next = {
+          ...p,
+          [sourceId]: { status: 'error', message: err.response?.data?.detail || err.message || 'Connection failed' },
+        }
+        settingsCache.testResults = next
+        return next
+      })
     } finally {
       setTesting((p) => ({ ...p, [sourceId]: false }))
     }
@@ -358,7 +423,7 @@ export default function SettingsPage() {
             return (
               <button
                 key={opt.key}
-                onClick={() => setFilter(opt.key)}
+                onClick={() => setCachedFilter(opt.key)}
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   width: '100%', padding: '9px 16px', textAlign: 'left',
@@ -405,7 +470,21 @@ export default function SettingsPage() {
               </span>
             </div>
 
-            {filtered.length === 0 ? (
+            {connectionsError && (
+              <div style={{
+                padding: '9px 14px', marginBottom: 14,
+                background: 'var(--red-lt)', border: '1px solid var(--red-bd)',
+                borderRadius: 7, color: 'var(--red)', fontSize: 13,
+              }}>
+                {connectionsError}
+              </div>
+            )}
+
+            {connectionsLoading && connections.length === 0 ? (
+              <p style={{ textAlign: 'center', color: 'var(--text3)', fontSize: 13, padding: '32px 0' }}>
+                Loading connections...
+              </p>
+            ) : filtered.length === 0 ? (
               <p style={{ textAlign: 'center', color: 'var(--text3)', fontSize: 13, padding: '32px 0' }}>
                 No connections found for this system type.
               </p>
@@ -563,6 +642,16 @@ export default function SettingsPage() {
                   + Add User
                 </button>
               </div>
+
+              {usersError && (
+                <div style={{
+                  padding: '9px 14px', marginBottom: 14,
+                  background: 'var(--red-lt)', border: '1px solid var(--red-bd)',
+                  borderRadius: 7, color: 'var(--red)', fontSize: 13,
+                }}>
+                  {usersError}
+                </div>
+              )}
 
               {usersLoading ? (
                 <p style={{ color: 'var(--text3)', fontSize: 13 }}>Loading users…</p>

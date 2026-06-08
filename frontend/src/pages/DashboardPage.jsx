@@ -5,6 +5,12 @@ import { getMetrics } from '../api/bugs'
 const SOURCE_ICON = { jira_apache: 'J', bugzilla: 'BZ', github: 'GH', confluence: 'CF', customer_portal: 'CP' }
 const SOURCE_CLS  = { jira_apache: 'ci-jira', bugzilla: 'ci-bz', github: 'ci-gh', confluence: 'ci-cf' }
 const SEV_CLS     = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
+const DASHBOARD_CACHE_MAX_AGE_MS = 60000
+
+let dashboardCache = {
+  metrics: null,
+  lastFetched: 0,
+}
 
 function timeAgo(iso) {
   if (!iso) return '—'
@@ -30,11 +36,37 @@ function StatCard({ label, value, color, topBorder, sub }) {
 }
 
 export default function DashboardPage() {
-  const [metrics, setMetrics] = useState(null)
+  const [metrics, setMetrics] = useState(() => dashboardCache.metrics)
+  const [loading, setLoading] = useState(() => !dashboardCache.metrics)
+  const [error, setError] = useState('')
   const navigate = useNavigate()
 
   useEffect(() => {
-    getMetrics().then(setMetrics).catch(console.error)
+    const hasCachedMetrics = !!dashboardCache.metrics
+    const cacheIsFresh = hasCachedMetrics && (Date.now() - dashboardCache.lastFetched < DASHBOARD_CACHE_MAX_AGE_MS)
+
+    if (cacheIsFresh) {
+      setMetrics(dashboardCache.metrics)
+      setLoading(false)
+      setError('')
+      return
+    }
+
+    if (!hasCachedMetrics) setLoading(true)
+    setError('')
+    getMetrics()
+      .then((data) => {
+        dashboardCache = {
+          metrics: data,
+          lastFetched: Date.now(),
+        }
+        setMetrics(data)
+      })
+      .catch((err) => {
+        console.error(err)
+        setError('Unable to refresh dashboard metrics. Showing last known data if available.')
+      })
+      .finally(() => setLoading(false))
   }, [])
 
   const liveP0     = metrics?.live_p0_count ?? 0
@@ -59,6 +91,23 @@ export default function DashboardPage() {
           <p>Auto-discovery active · {online} source{online !== 1 ? 's' : ''} online</p>
         </div>
       </div>
+
+      {error && (
+        <div style={{
+          padding: '9px 14px', marginBottom: 14,
+          background: 'var(--red-lt)', border: '1px solid var(--red-bd)',
+          borderRadius: 7, color: 'var(--red)', fontSize: 13,
+        }}>
+          {error}
+        </div>
+      )}
+
+      {loading && !metrics ? (
+        <div className="card" style={{ padding: 24, marginBottom: 16, color: 'var(--text3)', fontSize: 13 }}>
+          Loading dashboard metrics...
+        </div>
+      ) : (
+      <>
 
       {/* Live stats strip */}
       <div style={{
@@ -198,6 +247,8 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+      </>
+      )}
     </div>
   )
 }

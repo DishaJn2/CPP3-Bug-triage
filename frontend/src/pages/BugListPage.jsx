@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getBugs, getBugStatus, refreshBugCache, getMetrics } from '../api/bugs'
 import { startTriage } from '../api/triage'
+import { useBugListCache } from '../context/BugListCacheContext'
 
 const toPercent = (score) => {
   if (score == null) return 0
@@ -14,6 +15,7 @@ const SRC_LBL = { github: 'GH', jira: 'JIRA', jira_apache: 'JIRA', jira_cloud: '
 const SEV_CLS = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
 const SEVERITY_ORDER = ['P0', 'P1', 'P2', 'P3', 'Unknown']
 const ALL_SOURCES = ['All Sources', 'github', 'jira_apache', 'bugzilla']
+const BUGLIST_CACHE_MAX_AGE_MS = 120000
 
 function SevBadge({ sev }) {
   return <span className={`sev ${SEV_CLS[sev] || 'sev-unk'}`}>{sev || 'UNK'}</span>
@@ -494,25 +496,26 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
 }
 
 export default function BugListPage() {
-  const [bugs,          setBugs]          = useState([])
-  const [groups,        setGroups]        = useState([])
-  const [flatRows,      setFlatRows]      = useState([])
-  const [total,         setTotal]         = useState(0)
-  const [page,          setPage]          = useState(1)
-  const [loading,       setLoading]       = useState(true)
-  const [searchInput,   setSearchInput]   = useState('')
-  const [search,        setSearch]        = useState('')
-  const [severity,      setSeverity]      = useState('')
-  const [source,        setSource]        = useState('')
-  const [status,        setStatus]        = useState('open')
-  const [activePill,    setActivePill]    = useState('All')
+  const { cache: bugListCache, updateCache: updateBugListCache } = useBugListCache()
+  const [bugs,          setBugs]          = useState(() => bugListCache.bugs || [])
+  const [groups,        setGroups]        = useState(() => bugListCache.groups || [])
+  const [flatRows,      setFlatRows]      = useState(() => bugListCache.flatRows || [])
+  const [total,         setTotal]         = useState(() => bugListCache.total || 0)
+  const [page,          setPage]          = useState(() => bugListCache.page || 1)
+  const [loading,       setLoading]       = useState(() => !(bugListCache.lastFetched && (bugListCache.bugs || []).length > 0))
+  const [searchInput,   setSearchInput]   = useState(() => bugListCache.searchTerm || '')
+  const [search,        setSearch]        = useState(() => bugListCache.searchTerm || '')
+  const [severity,      setSeverity]      = useState(() => bugListCache.filters?.severity || '')
+  const [source,        setSource]        = useState(() => bugListCache.filters?.source || '')
+  const [status,        setStatus]        = useState(() => bugListCache.filters?.status || 'open')
+  const [activePill,    setActivePill]    = useState(() => bugListCache.filters?.activePill || 'All')
   const [triagingId,    setTriagingId]    = useState(null)
-  const [lastSynced,    setLastSynced]    = useState(null)
+  const [lastSynced,    setLastSynced]    = useState(() => bugListCache.lastSynced ? new Date(bugListCache.lastSynced) : null)
   const [directBugId,   setDirectBugId]  = useState('')
   const [refreshing,    setRefreshing]    = useState(false)
-  const [sourcesOnline, setSourcesOnline] = useState(0)
-  const [isPartial,     setIsPartial]     = useState(false)
-  const [cacheStatus,   setCacheStatus]   = useState(null)
+  const [sourcesOnline, setSourcesOnline] = useState(() => bugListCache.sourcesOnline || 0)
+  const [isPartial,     setIsPartial]     = useState(() => bugListCache.isPartial || false)
+  const [cacheStatus,   setCacheStatus]   = useState(() => bugListCache.cacheStatus || null)
   const [metrics,       setMetrics]       = useState(null)
   const navigate      = useNavigate()
   const intervalRef   = useRef(null)
@@ -520,12 +523,30 @@ export default function BugListPage() {
 
   // Debounce search
   useEffect(() => {
-    const timer = setTimeout(() => { setSearch(searchInput); setPage(1) }, 500)
+    const timer = setTimeout(() => {
+      if (search !== searchInput) {
+        setSearch(searchInput)
+        setPage(1)
+      }
+    }, 500)
     return () => clearTimeout(timer)
-  }, [searchInput])
+  }, [searchInput, search])
+
+  useEffect(() => {
+    updateBugListCache({
+      page,
+      searchTerm: search,
+      filters: {
+        severity,
+        source,
+        status,
+        activePill,
+      },
+    })
+  }, [page, search, severity, source, status, activePill, updateBugListCache])
 
   const fetchBugs = useCallback(async (silent = false) => {
-    if (!silent) {
+    if (!silent && bugs.length === 0) {
       setLoading(true)
       pollCountRef.current = 0
     }
@@ -537,26 +558,65 @@ export default function BugListPage() {
         ...nextGroups.flatMap((g) => g.children || []),
       ]
       const nextFlatRows = nextGroups.length > 0 ? (data.ungrouped || []) : allBugs
+      const fetchedAt = Date.now()
+      const syncedAt = new Date(fetchedAt)
       setBugs(allBugs)
       setGroups(nextGroups)
       setFlatRows(nextFlatRows)
       setTotal(data.total || 0)
       setSourcesOnline(data.sources_online || 0)
       setIsPartial(data.partial || false)
-      setLastSynced(new Date())
+      setLastSynced(syncedAt)
       setCacheStatus(data.cache_status || 'hit')
+      updateBugListCache({
+        bugs: allBugs,
+        groups: nextGroups,
+        flatRows: nextFlatRows,
+        total: data.total || 0,
+        page,
+        searchTerm: search,
+        filters: {
+          severity,
+          source,
+          status,
+          activePill,
+        },
+        sourcesOnline: data.sources_online || 0,
+        isPartial: data.partial || false,
+        cacheStatus: data.cache_status || 'hit',
+        lastFetched: fetchedAt,
+        lastSynced: syncedAt.toISOString(),
+      })
     } catch (e) {
       console.error('Failed to fetch bugs', e)
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [page, severity, source, status, search])
+  }, [page, severity, source, status, search, activePill, bugs.length, updateBugListCache])
 
   useEffect(() => {
-    fetchBugs()
-    intervalRef.current = setInterval(fetchBugs, 120000)
+    const cacheMatches =
+      bugListCache.page === page &&
+      (bugListCache.searchTerm || '') === search &&
+      (bugListCache.filters?.severity || '') === severity &&
+      (bugListCache.filters?.source || '') === source &&
+      (bugListCache.filters?.status || 'open') === status
+    const hasCachedRows = cacheMatches && ((bugListCache.bugs || []).length > 0 || (bugListCache.groups || []).length > 0)
+    const cacheAge = Date.now() - (bugListCache.lastFetched || 0)
+    const cacheIsFresh = hasCachedRows && cacheAge < BUGLIST_CACHE_MAX_AGE_MS
+
+    if (cacheIsFresh) {
+      setLoading(false)
+    } else if (hasCachedRows) {
+      setLoading(false)
+      fetchBugs(true)
+    } else {
+      fetchBugs()
+    }
+
+    intervalRef.current = setInterval(() => fetchBugs(true), 120000)
     return () => clearInterval(intervalRef.current)
-  }, [fetchBugs])
+  }, [fetchBugs, page, search, severity, source, status])
 
   // Poll every 1 s on cold start until data arrives (max 3 polls, then stop)
   useEffect(() => {
