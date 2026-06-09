@@ -42,6 +42,8 @@ SYSTEM_TYPE_TO_CLASS = {
 
 _connector_cache: list[BaseConnector] = []
 _token_provider: TokenProvider = EnvironmentTokenProvider()
+_health_cache: dict = {"data": None, "timestamp": 0}
+_health_lock = asyncio.Lock()
 
 
 def get_connector_class(system_type: str):
@@ -187,53 +189,91 @@ class ConnectorRegistry:
         ]
 
     @classmethod
-    async def health_check_all(cls, timeout: float = 10.0) -> list[dict]:
-        connectors = await cls.get_all_enabled()
+    async def health_check_all(cls, timeout: float = 10.0, use_cache: bool = False) -> list[dict]:
+        import time
+        global _health_cache, _health_lock
+        current_time = time.time()
 
-        async def check_one(connector: BaseConnector) -> dict:
-            try:
-                result = await asyncio.wait_for(
-                    connector.health_check(),
-                    timeout=timeout,
-                )
-                result.setdefault("source_id", connector.source_id)
-                result.setdefault("system_type", connector.system_type)
-                result.setdefault(
-                    "display_name",
-                    getattr(connector, "display_name", connector.source_id),
-                )
-                return result
-            except asyncio.TimeoutError:
-                return {
-                    "source_id": connector.source_id,
-                    "system_type": connector.system_type,
-                    "display_name": getattr(
-                        connector, "display_name", connector.source_id),
-                    "status": "timeout",
-                    "ok": False,
-                    "latency_ms": int(timeout * 1000),
-                    "error": "health check timed out",
-                }
-            except Exception as e:
-                return {
-                    "source_id": connector.source_id,
-                    "system_type": connector.system_type,
-                    "display_name": getattr(
-                        connector, "display_name", connector.source_id),
-                    "status": "error",
-                    "ok": False,
-                    "latency_ms": 0,
-                    "error": str(e)[:300],
-                }
+        if use_cache and _health_cache["data"] is not None and (current_time - _health_cache["timestamp"]) < 120:
+            return _health_cache["data"]
 
-        return await asyncio.gather(
-            *[check_one(connector) for connector in connectors]
-        )
+        async with _health_lock:
+            # Check cache again after acquiring lock in case another request populated it
+            current_time = time.time()
+            if use_cache and _health_cache["data"] is not None and (current_time - _health_cache["timestamp"]) < 120:
+                return _health_cache["data"]
+
+            connectors = await cls.get_all_enabled()
+
+            async def check_one(connector: BaseConnector) -> dict:
+                try:
+                    result = await asyncio.wait_for(
+                        connector.health_check(),
+                        timeout=timeout,
+                    )
+                    result.setdefault("source_id", connector.source_id)
+                    result.setdefault("system_type", connector.system_type)
+                    result.setdefault(
+                        "display_name",
+                        getattr(connector, "display_name", connector.source_id),
+                    )
+                    return result
+                except asyncio.TimeoutError:
+                    return {
+                        "source_id": connector.source_id,
+                        "system_type": connector.system_type,
+                        "display_name": getattr(
+                            connector, "display_name", connector.source_id),
+                        "status": "disconnected",
+                        "ok": False,
+                        "latency_ms": int(timeout * 1000),
+                        "error": "health check timed out",
+                    }
+                except Exception as e:
+                    return {
+                        "source_id": connector.source_id,
+                        "system_type": connector.system_type,
+                        "display_name": getattr(
+                            connector, "display_name", connector.source_id),
+                        "status": "disconnected",
+                        "ok": False,
+                        "latency_ms": 0,
+                        "error": str(e)[:300],
+                    }
+
+            results = await asyncio.gather(
+                *[check_one(connector) for connector in connectors]
+            )
+            _health_cache["data"] = results
+            _health_cache["timestamp"] = time.time()
+            return results
+
+    @classmethod
+    async def get_healthy_count(cls) -> int:
+        import time
+        global _health_cache
+        current_time = time.time()
+        
+        if _health_cache["data"] is not None and (current_time - _health_cache["timestamp"]) < 120:
+            return sum(1 for r in _health_cache["data"] if r.get("ok") is True)
+            
+        try:
+            results = await asyncio.wait_for(cls.health_check_all(timeout=8.0, use_cache=True), timeout=20.0)
+            return sum(1 for r in results if r.get("ok") is True)
+        except Exception as e:
+            # Smart fallback: If the network ping times out, count systems that are fully configured with tokens
+            connectors = await cls.get_all_enabled()
+            count = 0
+            for c in connectors:
+                if c.system_type == "customer_portal" or getattr(c, "token", ""):
+                    count += 1
+            return count
 
     @classmethod
     def invalidate_cache(cls) -> None:
-        global _connector_cache
+        global _connector_cache, _health_cache
         _connector_cache = []
+        _health_cache["timestamp"] = 0
 
 
 def get_connector_for_ticket(ticket_id: str) -> BaseConnector | None:

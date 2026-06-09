@@ -26,7 +26,7 @@ export default function TopBar() {
     getMetrics()
       .then((data) => setConnCount(data?.sources_online ?? 0))
       .catch(() => setConnCount(0))
-  }, [])
+  }, [location.pathname])
 
   const handleLogout = () => {
     logout()
