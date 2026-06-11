@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import Protocol
 
 import structlog
@@ -41,6 +42,8 @@ SYSTEM_TYPE_TO_CLASS = {
 }
 
 _connector_cache: list[BaseConnector] = []
+_connector_cache_ts: float = 0.0
+_CONNECTOR_CACHE_TTL_SECONDS = 60
 _token_provider: TokenProvider = EnvironmentTokenProvider()
 _health_cache: dict = {"data": None, "timestamp": 0}
 _health_lock = asyncio.Lock()
@@ -51,12 +54,15 @@ def get_connector_class(system_type: str):
 
 
 def set_token_provider(provider: TokenProvider) -> None:
-    global _token_provider
+    global _token_provider, _connector_cache, _connector_cache_ts
     _token_provider = provider
+    # Cached connectors were built with tokens from the previous provider
+    _connector_cache = []
+    _connector_cache_ts = 0.0
 
 
 async def load_connectors_from_db() -> list[BaseConnector]:
-    global _connector_cache
+    global _connector_cache, _connector_cache_ts
 
     try:
         from ..db.session import AsyncSessionLocal
@@ -109,12 +115,17 @@ async def load_connectors_from_db() -> list[BaseConnector]:
                         error=str(e))
 
     _connector_cache = connectors
+    _connector_cache_ts = time.time()
     return connectors
 
 
 class ConnectorRegistry:
     @classmethod
     async def get_all_enabled(cls) -> list[BaseConnector]:
+        if (_connector_cache
+                and time.time() - _connector_cache_ts
+                < _CONNECTOR_CACHE_TTL_SECONDS):
+            return _connector_cache
         return await load_connectors_from_db()
 
     @classmethod
@@ -271,8 +282,9 @@ class ConnectorRegistry:
 
     @classmethod
     def invalidate_cache(cls) -> None:
-        global _connector_cache, _health_cache
+        global _connector_cache, _connector_cache_ts, _health_cache
         _connector_cache = []
+        _connector_cache_ts = 0.0
         _health_cache["timestamp"] = 0
 
 
