@@ -117,7 +117,6 @@ async def get_triage_result(case_id: str) -> dict:
                         "root_cause": summary.get("root_cause", ""),
                         "recommended_actions": summary.get("recommended_actions", []),
                         "summary": summary.get("summary", ""),
-                        "status_summary": summary.get("status_summary", ""),
                         "used_fallback": summary.get("used_fallback", False),
                     },
                     "related_tickets": [],

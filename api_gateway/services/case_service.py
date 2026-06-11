@@ -52,7 +52,7 @@ async def get_case_result(case_id: str) -> dict:
                 status_code=404,
                 detail=(
                     "Case result not found. "
-                    "Results are cached for 1 hour after triage."),
+                    "Results are cached for 2 minutes."),
             )
         return {
             "case_id": case_id,

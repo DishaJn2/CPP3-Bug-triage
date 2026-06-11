@@ -161,7 +161,6 @@ async def get_triage_result(case_id: str, user: User = Depends(get_current_user)
 #                         "confidence": summary.get("confidence"),
 #                         "root_cause": summary.get("root_cause", ""),
 #                         "recommended_actions": summary.get("recommended_actions", []),
-#                         "status_summary": summary.get("status_summary", ""),
 #                         "used_fallback": summary.get("used_fallback", False),
 #                     },
 #                     "related_tickets": [],

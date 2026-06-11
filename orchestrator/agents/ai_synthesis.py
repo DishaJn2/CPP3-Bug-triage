@@ -15,7 +15,6 @@ log = structlog.get_logger()
 
 SYNTHESIS_SCHEMA = """{
   "unified_severity": "P0|P1|P2|P3",
-  "status_summary": "string",
   "affected_components": ["string"],
   "root_cause": "string",
   "recommended_actions": ["string"],
@@ -148,8 +147,9 @@ class AISynthesisAgent(BaseAgent):
         if bug_id_ctx:
             try:
                 from ..redis_client import get_redis
+                from api_gateway.config import REDIS_TTL_CASE_SECONDS
                 _r = await get_redis()
-                await _r.setex(_cache_key, 120,
+                await _r.setex(_cache_key, REDIS_TTL_CASE_SECONDS,
                                json.dumps(context["synthesis"]))
             except Exception:
                 pass
@@ -273,7 +273,6 @@ Guidelines:
         component = primary.get("component", "Unknown")
         return SynthesisOutput(
             unified_severity=severity if severity in ("P0", "P1", "P2", "P3") else "P2",
-            status_summary=f"Bug '{title}' requires investigation.",
             affected_components=[component] if component else [],
             root_cause="Root cause analysis requires manual investigation.",
             recommended_actions=[
