@@ -15,7 +15,6 @@ log = structlog.get_logger()
 
 SYNTHESIS_SCHEMA = """{
   "unified_severity": "P0|P1|P2|P3",
-  "status_summary": "string",
   "affected_components": ["string"],
   "root_cause": "string",
   "recommended_actions": ["string"],
@@ -273,7 +272,6 @@ Guidelines:
         component = primary.get("component", "Unknown")
         return SynthesisOutput(
             unified_severity=severity if severity in ("P0", "P1", "P2", "P3") else "P2",
-            status_summary=f"Bug '{title}' requires investigation.",
             affected_components=[component] if component else [],
             root_cause="Root cause analysis requires manual investigation.",
             recommended_actions=[

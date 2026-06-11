@@ -4,7 +4,6 @@ from typing import List
 
 class SynthesisOutput(BaseModel):
     unified_severity: str = Field(description="P0, P1, P2, or P3")
-    status_summary: str
     affected_components: List[str] = Field(default_factory=list)
     root_cause: str
     recommended_actions: List[str] = Field(default_factory=list)
