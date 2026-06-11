@@ -539,7 +539,7 @@ export default function BugListPage() {
   const [search,        setSearch]        = useState('')
   const [severity,      setSeverity]      = useState('')
   const [source,        setSource]        = useState('')
-  const [status,        setStatus]        = useState('open')
+  const [status,        setStatus]        = useState('')
   const [activePill,    setActivePill]    = useState('All')
   const [triagingId,    setTriagingId]    = useState(null)
   const [lastSynced,    setLastSynced]    = useState(() => bugListCache.lastSynced ? new Date(bugListCache.lastSynced) : null)
