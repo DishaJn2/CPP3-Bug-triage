@@ -149,7 +149,7 @@ class AISynthesisAgent(BaseAgent):
                 from ..redis_client import get_redis
                 from api_gateway.config import REDIS_TTL_CASE_SECONDS
                 _r = await get_redis()
-                await _r.setex(_cache_key, REDIS_TTL_CASE_SECONDS,
+                await _r.setex(_cache_key, 120,
                                json.dumps(context["synthesis"]))
             except Exception:
                 pass
