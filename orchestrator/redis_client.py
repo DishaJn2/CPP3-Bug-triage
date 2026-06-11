@@ -9,7 +9,7 @@ load_dotenv()
 log = structlog.get_logger()
 _redis_client = None
 BUGLIST_CACHE_TTL_SECONDS = 120
-PANEL_TTL_SECONDS = 3600
+PANEL_TTL_SECONDS = 120
 PANEL_ORDER = [
     "bug_context",
     "related_issues",
@@ -190,7 +190,7 @@ async def get_stored_panels(case_id: str) -> list[dict]:
         return []
 
 
-async def cache_case_result(case_id: str, data: dict, ttl: int = 3600) -> None:
+async def cache_case_result(case_id: str, data: dict, ttl: int = 120) -> None:
     try:
         r = await get_redis()
         await r.setex(f"case:{case_id}", ttl, json.dumps(data))
