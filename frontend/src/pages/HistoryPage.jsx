@@ -4,6 +4,12 @@ import { getTriageHistory } from '../api/bugs'
 import { startTriage } from '../api/triage'
 
 const SEV_CLS = { P0: 'sev-p0', P1: 'sev-p1', P2: 'sev-p2', P3: 'sev-p3' }
+const HISTORY_CACHE_MAX_AGE_MS = 120000
+
+let historyCache = {
+  history: [],
+  lastFetched: 0,
+}
 
 function confColor(val) {
   if (val >= 0.8) return 'var(--green)'
@@ -22,12 +28,38 @@ function fmtDate(iso) {
 }
 
 export default function HistoryPage() {
-  const [history,     setHistory]     = useState([])
+  const [history,     setHistory]     = useState(() => historyCache.history || [])
+  const [loading,     setLoading]     = useState(() => !(historyCache.history || []).length)
+  const [error,       setError]       = useState('')
   const [retriagingId, setRetriagingId] = useState(null)
   const navigate = useNavigate()
 
   useEffect(() => {
-    getTriageHistory(50).then(setHistory).catch(console.error)
+    const hasCachedHistory = (historyCache.history || []).length > 0
+    const cacheIsFresh = hasCachedHistory && (Date.now() - historyCache.lastFetched < HISTORY_CACHE_MAX_AGE_MS)
+
+    if (cacheIsFresh) {
+      setHistory(historyCache.history)
+      setLoading(false)
+      setError('')
+      return
+    }
+
+    if (!hasCachedHistory) setLoading(true)
+    setError('')
+    getTriageHistory(50)
+      .then((data) => {
+        historyCache = {
+          history: data || [],
+          lastFetched: Date.now(),
+        }
+        setHistory(data || [])
+      })
+      .catch((err) => {
+        console.error(err)
+        setError('Unable to load triage history. Showing last known data if available.')
+      })
+      .finally(() => setLoading(false))
   }, [])
 
   const handleRetriage = async (bugId) => {
@@ -57,7 +89,21 @@ export default function HistoryPage() {
         <p>Recent pipeline completions · last 50</p>
       </div>
 
-      {history.length === 0 ? (
+      {error && (
+        <div style={{
+          padding: '9px 14px', marginBottom: 14,
+          background: 'var(--red-lt)', border: '1px solid var(--red-bd)',
+          borderRadius: 7, color: 'var(--red)', fontSize: 13,
+        }}>
+          {error}
+        </div>
+      )}
+
+      {loading && history.length === 0 ? (
+        <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text3)', fontSize: 13 }}>
+          Loading triage history...
+        </div>
+      ) : history.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '56px 40px' }}>
           <p style={{ margin: '0 0 6px', fontSize: 14, color: 'var(--text2)', fontWeight: 600 }}>
             No triage history yet.

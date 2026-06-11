@@ -13,6 +13,8 @@ from .routes.cases_routes import _background_fetch_connector
 
 log = structlog.get_logger()
 
+BUGLIST_REFRESH_INTERVAL_SECONDS = 60
+
 
 async def start_kafka_consumer():
     # Only run Kafka consumer if local fallback is disabled
@@ -88,8 +90,10 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     log.warning(f"[Ingestion] Cycle error: {e}")
 
-                # Run every 4 minutes to keep 300s TTL cache warm
-                await asyncio.sleep(240)
+                # Keep this lower than the 120s Redis bug-list TTL so the
+                # warmer refreshes entries before they expire and avoids
+                # cold-cache windows without changing cache freshness.
+                await asyncio.sleep(BUGLIST_REFRESH_INTERVAL_SECONDS)
 
         ingestion_task = asyncio.create_task(background_ingestion())
         app.state.ingestion_task = ingestion_task
