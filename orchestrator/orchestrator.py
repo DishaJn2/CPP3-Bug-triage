@@ -291,7 +291,7 @@ class TaskOrchestrator:
         # the next GET /bugs reflects the new triage_info.
         try:
             _r = await get_redis()
-            _keys = await _r.keys("bug_list:*")
+            _keys = await _r.keys("buglist:*")
             if _keys:
                 await _r.delete(*_keys)
         except Exception:
