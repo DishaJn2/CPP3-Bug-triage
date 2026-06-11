@@ -192,13 +192,13 @@ class TaskOrchestrator:
                 import json as _json
                 _r = await get_redis()
                 await _r.setex(
-                    f"related:{case_id}", 3600,
+                    f"related:{case_id}", 120,
                     _json.dumps(context.get("related_tickets") or []))
                 await _r.setex(
-                    f"enrichment:{case_id}", 3600,
+                    f"enrichment:{case_id}", 120,
                     _json.dumps(context.get("enrichment_sources") or []))
                 await _r.setex(
-                    f"kb:{case_id}", 3600,
+                    f"kb:{case_id}", 120,
                     _json.dumps(context.get("kb_articles") or []))
             except Exception:
                 pass
@@ -254,7 +254,7 @@ class TaskOrchestrator:
             "bug_id": bug_id,
             "source_id": source_id,
             "context": context,
-        }, ttl=86400)
+        }, ttl=120)
 
         async with AsyncSessionLocal() as db:
             await insert_audit_entry(db, {
