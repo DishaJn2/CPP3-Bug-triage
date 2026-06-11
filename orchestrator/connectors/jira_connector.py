@@ -1,4 +1,5 @@
 import httpx
+import asyncio
 from .base_connector import BaseConnector
 from ..models.ticket import TicketData, ChangeEvent
 
@@ -16,6 +17,7 @@ JIRA_PRIORITY_MAP = {
     "p0": "P0",
     "high": "P1",
     "p1": "P1",
+    "major": "P1",
     "medium": "P2",
     "p2": "P2",
     "normal": "P2",
@@ -132,26 +134,48 @@ class JiraConnector(BaseConnector):
         fields = ["summary", "description", "status", "priority", "components",
                   "assignee", "reporter", "created", "updated", "comment", "issuelinks"]
         if query:
-            jql = f'project = {self.project_key} AND text ~ "{query}" ORDER BY updated DESC'
+            jql = f'project = {self.project_key} AND resolution = Unresolved AND text ~ "{query}" ORDER BY updated DESC'
         else:
-            jql = f'project = {self.project_key} AND statusCategory in ("To Do", "In Progress") ORDER BY updated DESC'
+            jql = f'project = {self.project_key} AND resolution = Unresolved ORDER BY updated DESC'
 
-        payload = {
-            "jql": jql,
-            "maxResults": min(max_results, 100),
-            "startAt": start_at,
-            "fields": fields,
-        }
+        MAX_CHUNKS = 20 # 10k bugs ceiling
+        CHUNK_SIZE = 500
+        
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.post(
-                    f"{self.base_url}/rest/api/2/search",
-                    json=payload, headers=self._headers()
-                )
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                # 1. Fetch total count first
+                count_payload = {"jql": jql, "maxResults": 0}
+                resp = await client.post(f"{self.base_url}/rest/api/2/search", json=count_payload, headers=self._headers())
                 resp.raise_for_status()
-                issues = resp.json().get("issues") or []
-                return [self._normalise(issue) for issue in issues if isinstance(issue, dict)]
-        except Exception:
+                total = resp.json().get("total", 0)
+                
+                if total == 0:
+                    return []
+                
+                # Cap chunks
+                num_chunks = min(MAX_CHUNKS, (total + CHUNK_SIZE - 1) // CHUNK_SIZE)
+                
+                async def fetch_chunk(start_idx: int):
+                    payload = {
+                        "jql": jql,
+                        "maxResults": CHUNK_SIZE,
+                        "startAt": start_idx,
+                        "fields": fields,
+                    }
+                    chunk_resp = await client.post(f"{self.base_url}/rest/api/2/search", json=payload, headers=self._headers())
+                    chunk_resp.raise_for_status()
+                    return chunk_resp.json().get("issues", [])
+                
+                tasks = [fetch_chunk(start_idx * CHUNK_SIZE) for start_idx in range(num_chunks)]
+                results = await asyncio.gather(*tasks)
+                
+                all_issues = []
+                for chunk in results:
+                    all_issues.extend(chunk)
+                
+                return [self._normalise(issue) for issue in all_issues if isinstance(issue, dict)]
+        except Exception as e:
+            print(f"[JIRA] Search error: {e}")
             return []
 
     async def get_lightweight(self, ticket_id: str) -> dict:

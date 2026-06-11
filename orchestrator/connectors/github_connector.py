@@ -1,5 +1,6 @@
 import re
 import httpx
+import asyncio
 from .base_connector import BaseConnector
 from ..models.ticket import TicketData, ChangeEvent
 
@@ -94,24 +95,46 @@ class GithubConnector(BaseConnector):
             return None
 
     async def search(self, query: str, max_results: int = 300, page: int = 1) -> list[TicketData]:
-        if query:
-            url = f"https://api.github.com/search/issues"
-            params = {"q": f"{query}+repo:{self._repo()}+is:issue+is:open", "per_page": min(max_results, 100), "page": page}
-        else:
-            url = f"https://api.github.com/repos/{self._repo()}/issues"
-            params = {"state": "open", "per_page": min(max_results, 100), "page": page, "sort": "updated", "direction": "desc"}
+        MAX_PAGES = 20 # 2000 bugs ceiling for GitHub to avoid heavy rate limits
+        per_page = 100
+        
+        async def fetch_page(p: int, client: httpx.AsyncClient):
+            if query:
+                url = f"https://api.github.com/search/issues"
+                params = {"q": f"{query}+repo:{self._repo()}+is:issue+is:open", "per_page": per_page, "page": p}
+            else:
+                url = f"https://api.github.com/repos/{self._repo()}/issues"
+                params = {"state": "open", "per_page": per_page, "page": p, "sort": "updated", "direction": "desc"}
+            
+            resp = await client.get(url, headers=self._headers(), params=params)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            items = data.get("items", data) if query else data
+            if not isinstance(items, list):
+                return []
+            return items
 
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.get(url, headers=self._headers(), params=params)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                items = data.get("items", data) if query else data
-                if not isinstance(items, list):
-                    return []
-                return [self._normalise(i) for i in items if i.get("pull_request") is None]
-        except Exception:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                # To be fast but respect GitHub limits, we'll fetch in batches of 5 pages
+                all_raw_items = []
+                for batch_start in range(1, MAX_PAGES + 1, 5):
+                    tasks = [fetch_page(p, client) for p in range(batch_start, batch_start + 5)]
+                    batch_results = await asyncio.gather(*tasks)
+                    
+                    batch_had_full_page = False
+                    for page_items in batch_results:
+                        all_raw_items.extend(page_items)
+                        if len(page_items) == per_page:
+                            batch_had_full_page = True
+                            
+                    if not batch_had_full_page:
+                        break # We reached the end
+                        
+                return [self._normalise(i) for i in all_raw_items if i.get("pull_request") is None]
+        except Exception as e:
+            print(f"[GITHUB] Search error: {e}")
             return []
 
     async def get_linked_items(self, ticket_id: str) -> list[dict]:

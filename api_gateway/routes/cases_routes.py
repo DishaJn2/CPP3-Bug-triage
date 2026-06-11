@@ -368,53 +368,62 @@ def _normalize_list_bug(ticket, connector) -> dict:
     }
 
 
+_FETCH_LOCKS = {}
+
 async def _fetch_buglist_for_connector(
         connector,
         status: str,
         severity: str,
         max_results: int) -> dict:
-    cached = await get_cached_buglist(
-        connector.source_id, status, severity)
-    if cached is not None:
-        return {
-            "source_id": connector.source_id,
-            "bugs": cached,
-            "cache_status": "hit",
-            "error": None,
-        }
-
-    try:
-        tickets = await asyncio.wait_for(
-            connector.search_open_bugs(
-                status=status,
-                severity=severity,
-                max_results=max_results,
-            ),
-            timeout=20.0,
-        )
-        bugs = [
-            _normalize_list_bug(ticket, connector)
-            for ticket in (tickets or [])
-        ]
-        await cache_buglist(
-            connector.source_id, status, severity, bugs, ttl=120)
-        return {
-            "source_id": connector.source_id,
-            "bugs": bugs,
-            "cache_status": "miss",
-            "error": None,
-        }
-    except Exception as e:
-        return {
-            "source_id": connector.source_id,
-            "bugs": [],
-            "cache_status": "error",
-            "error": {
+    
+    lock_key = f"{connector.source_id}:{status}:{severity}"
+    if lock_key not in _FETCH_LOCKS:
+        _FETCH_LOCKS[lock_key] = asyncio.Lock()
+        
+    async with _FETCH_LOCKS[lock_key]:
+        # Check cache inside the lock to prevent stampede
+        cached = await get_cached_buglist(
+            connector.source_id, status, severity)
+        if cached is not None:
+            return {
                 "source_id": connector.source_id,
-                "system_type": connector.system_type,
-                "message": str(e)[:300],
-            },
-        }
+                "bugs": cached,
+                "cache_status": "hit",
+                "error": None,
+            }
+
+        try:
+            tickets = await asyncio.wait_for(
+                connector.search_open_bugs(
+                    status=status,
+                    severity=severity,
+                    max_results=max_results,
+                ),
+                timeout=90.0,
+            )
+            bugs = [
+                _normalize_list_bug(ticket, connector)
+                for ticket in (tickets or [])
+            ]
+            await cache_buglist(
+                connector.source_id, status, severity, bugs, ttl=300)
+            return {
+                "source_id": connector.source_id,
+                "bugs": bugs,
+                "cache_status": "miss",
+                "error": None,
+            }
+        except Exception as e:
+            return {
+                "source_id": connector.source_id,
+                "bugs": [],
+                "cache_status": "error",
+                "error": {
+                    "source_id": connector.source_id,
+                    "system_type": connector.system_type,
+                    "message": str(e)[:300],
+                },
+            }
 
 
 async def _background_fetch_connector(connector) -> None:
@@ -425,7 +434,7 @@ async def _background_fetch_connector(connector) -> None:
                 severity="",
                 max_results=300,
             ),
-            timeout=20.0,
+            timeout=90.0,
         )
 
         if tickets:
@@ -436,7 +445,7 @@ async def _background_fetch_connector(connector) -> None:
 
             await cache_buglist(
                 connector.source_id, "open", "",
-                sanitized_data, ttl=120)
+                sanitized_data, ttl=300)
 
             print(f"[BugList] {connector.source_id}: "
                   f"{len(sanitized_data)} bugs cached")
@@ -906,11 +915,13 @@ async def get_metrics(user: User = Depends(get_current_user)):
     total_triages = summary.get("total_triaged", 0)
     needs_triage  = max(0, live_total - total_triages)
 
+    healthy_count = await ConnectorRegistry.get_healthy_count()
+
     return {
         "total_triages":   total_triages,
         "total_triaged":   total_triages,
-        "sources_online":  len(bug_connectors),
-        "sources_total":   len(bug_connectors),
+        "sources_online":  healthy_count,
+        "sources_total":   len(all_connectors),
         "by_severity":     by_severity,
         "by_source":       source_counts,
         "avg_confidence":  avg_confidence,

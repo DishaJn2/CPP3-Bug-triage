@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { getConnections, addConnection, updateConnection, removeConnection, testConnection, listUsers, createUser, deleteUser } from '../api/settings'
+import { clearBugsCache } from './BugListPage'
 
 const SYSTEM_TYPES = [
   { value: 'jira',        label: 'JIRA' },
@@ -169,7 +170,6 @@ function RoleBadge({ role }) {
     </span>
   )
 }
-
 export default function SettingsPage() {
   const { user }                                    = useAuth()
   const [connections,    setConnections]            = useState(() => settingsCache.connections || [])
@@ -203,72 +203,60 @@ export default function SettingsPage() {
   })
 
   const isAdmin = user?.role === 'admin'
-
-  const setCachedFilter = (nextFilter) => {
-    settingsCache.filter = nextFilter
-    setFilter(nextFilter)
-  }
-
+const setCachedFilter = (nextFilter) => {
+  settingsCache.filter = nextFilter
+  setFilter(nextFilter)
+}
   const fetchConnections = (background = false) => {
-    if (!background && connections.length === 0) setConnectionsLoading(true)
-    setConnectionsError('')
-    return getConnections()
-      .then((data) => {
-        const nextConnections = data.connections || []
-        const nextByType = data.by_type || {}
-        settingsCache.connections = nextConnections
-        settingsCache.byType = nextByType
-        settingsCache.lastFetchedConnections = Date.now()
-        setConnections(nextConnections)
-        setByType(nextByType)
-      })
-      .catch((err) => {
-        console.error(err)
-        setConnectionsError('Unable to load connections. Showing last known data if available.')
-      })
-      .finally(() => setConnectionsLoading(false))
-  }
+  if (!background && connections.length === 0) setConnectionsLoading(true)
+  setConnectionsError('')
+  return getConnections()
+    .then((data) => {
+      const nextConnections = data.connections || []
+      const nextByType = data.by_type || {}
+      settingsCache.connections = nextConnections
+      settingsCache.byType = nextByType
+      settingsCache.lastFetchedConnections = Date.now()
+      setConnections(nextConnections)
+      setByType(nextByType)
+    })
+    .catch((err) => {
+      console.error(err)
+      setConnectionsError('Unable to load connections.')
+    })
+    .finally(() => setConnectionsLoading(false))
+}
 
-  const fetchUsers = (background = false) => {
-    if (!isAdmin) return
-    if (!background && users.length === 0) setUsersLoading(true)
-    setUsersError('')
-    return listUsers()
-      .then((data) => {
-        const nextUsers = data || []
-        settingsCache.users = nextUsers
-        settingsCache.lastFetchedUsers = Date.now()
-        setUsers(nextUsers)
-      })
-      .catch((err) => {
-        console.error(err)
-        setUsersError('Unable to load users. Showing last known data if available.')
-      })
-      .finally(() => setUsersLoading(false))
-  }
 
-  useEffect(() => {
-    const hasCachedConnections = (settingsCache.connections || []).length > 0
-    const connectionsFresh = hasCachedConnections && (Date.now() - settingsCache.lastFetchedConnections < SETTINGS_CACHE_MAX_AGE_MS)
-    if (connectionsFresh) {
-      setConnections(settingsCache.connections)
-      setByType(settingsCache.byType || {})
-      setConnectionsLoading(false)
-    } else {
-      fetchConnections(hasCachedConnections)
-    }
+ const fetchUsers = (background = false) => {
+  if (!isAdmin) return
+  if (!background && users.length === 0) setUsersLoading(true)
+  setUsersError('')
+  return listUsers()
+    .then((data) => {
+      const nextUsers = data || []
+      settingsCache.users = nextUsers
+      settingsCache.lastFetchedUsers = Date.now()
+      setUsers(nextUsers)
+    })
+    .catch((err) => {
+      console.error(err)
+      setUsersError('Unable to load users.')
+    })
+    .finally(() => setUsersLoading(false))
+}
 
-    if (isAdmin) {
-      const hasCachedUsers = (settingsCache.users || []).length > 0
-      const usersFresh = hasCachedUsers && (Date.now() - settingsCache.lastFetchedUsers < SETTINGS_CACHE_MAX_AGE_MS)
-      if (usersFresh) {
-        setUsers(settingsCache.users)
-        setUsersLoading(false)
-      } else {
-        fetchUsers(hasCachedUsers)
-      }
-    }
-  }, [isAdmin])
+ useEffect(() => {
+  fetchConnections()
+  if (isAdmin) fetchUsers()
+
+  const interval = setInterval(() => {
+    fetchConnections(true)
+    if (isAdmin) fetchUsers(true)
+  }, 120000)
+
+  return () => clearInterval(interval)
+}, [isAdmin])
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
 
@@ -295,13 +283,24 @@ export default function SettingsPage() {
     }
   }
 
-  const handleRemove = async (sourceId) => {
-    if (!window.confirm('Remove this connection?')) return
-    try {
-      await removeConnection(sourceId)
-      fetchConnections()
-    } catch (err) {
-      alert('Failed to remove: ' + (err.response?.data?.detail || err.message))
+  const handleToggleEnable = async (conn) => {
+    if (conn.enabled) {
+      if (!window.confirm('Disable this connection?')) return
+      try {
+        await removeConnection(conn.source_id)
+        clearBugsCache()
+        fetchConnections()
+      } catch (err) {
+        alert('Failed to disable: ' + (err.response?.data?.detail || err.message))
+      }
+    } else {
+      try {
+        await updateConnection(conn.source_id, { enabled: true })
+        clearBugsCache()
+        fetchConnections()
+      } catch (err) {
+        alert('Failed to enable: ' + (err.response?.data?.detail || err.message))
+      }
     }
   }
 
@@ -495,6 +494,7 @@ export default function SettingsPage() {
               return (
                 <div key={conn.source_id} style={{
                   border: '1px solid var(--border)', borderRadius: 10, padding: 16, marginBottom: 12,
+                  opacity: conn.enabled ? 1 : 0.6,
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center' }}>
                     <div style={{
@@ -549,10 +549,14 @@ export default function SettingsPage() {
                       </button>
                       <button
                         className="btn btn-sm"
-                        style={{ border: '1px solid var(--red-bd)', color: 'var(--red)', background: 'transparent' }}
-                        onClick={() => handleRemove(conn.source_id)}
+                        style={{
+                          border: `1px solid ${conn.enabled ? 'var(--red-bd)' : 'var(--green)'}`,
+                          color: conn.enabled ? 'var(--red)' : 'var(--green)',
+                          background: 'transparent'
+                        }}
+                        onClick={() => handleToggleEnable(conn)}
                       >
-                        Remove
+                        {conn.enabled ? 'Disable' : 'Enable'}
                       </button>
                     </div>
                   </div>

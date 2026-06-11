@@ -495,20 +495,32 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   )
 }
 
+export const clearBugsCache = () => {
+  for (const k in bugsCache) {
+    delete bugsCache[k]
+  }
+}
+
+const bugsCache = {};
+
 export default function BugListPage() {
   const { cache: bugListCache, updateCache: updateBugListCache } = useBugListCache()
-  const [bugs,          setBugs]          = useState(() => bugListCache.bugs || [])
-  const [groups,        setGroups]        = useState(() => bugListCache.groups || [])
-  const [flatRows,      setFlatRows]      = useState(() => bugListCache.flatRows || [])
-  const [total,         setTotal]         = useState(() => bugListCache.total || 0)
-  const [page,          setPage]          = useState(() => bugListCache.page || 1)
-  const [loading,       setLoading]       = useState(() => !(bugListCache.lastFetched && (bugListCache.bugs || []).length > 0))
-  const [searchInput,   setSearchInput]   = useState(() => bugListCache.searchTerm || '')
-  const [search,        setSearch]        = useState(() => bugListCache.searchTerm || '')
-  const [severity,      setSeverity]      = useState(() => bugListCache.filters?.severity || '')
-  const [source,        setSource]        = useState(() => bugListCache.filters?.source || '')
-  const [status,        setStatus]        = useState(() => bugListCache.filters?.status || 'open')
-  const [activePill,    setActivePill]    = useState(() => bugListCache.filters?.activePill || 'All')
+  const navigate      = useNavigate()
+  const intervalRef   = useRef(null)
+  const pollCountRef  = useRef(0)
+  const [bugs,          setBugs]          = useState([])
+  const [groups,        setGroups]        = useState([])
+  const [flatRows,      setFlatRows]      = useState([])
+  const [total,         setTotal]         = useState(0)
+  const [page,          setPage]          = useState(1)
+  const [pageInput,     setPageInput]     = useState('')
+  const [loading,       setLoading]       = useState(true)
+  const [searchInput,   setSearchInput]   = useState('')
+  const [search,        setSearch]        = useState('')
+  const [severity,      setSeverity]      = useState('')
+  const [source,        setSource]        = useState('')
+  const [status,        setStatus]        = useState('open')
+  const [activePill,    setActivePill]    = useState('All')
   const [triagingId,    setTriagingId]    = useState(null)
   const [lastSynced,    setLastSynced]    = useState(() => bugListCache.lastSynced ? new Date(bugListCache.lastSynced) : null)
   const [directBugId,   setDirectBugId]  = useState('')
@@ -517,9 +529,6 @@ export default function BugListPage() {
   const [isPartial,     setIsPartial]     = useState(() => bugListCache.isPartial || false)
   const [cacheStatus,   setCacheStatus]   = useState(() => bugListCache.cacheStatus || null)
   const [metrics,       setMetrics]       = useState(null)
-  const navigate      = useNavigate()
-  const intervalRef   = useRef(null)
-  const pollCountRef  = useRef(0)
 
   // Debounce search
   useEffect(() => {
@@ -546,12 +555,38 @@ export default function BugListPage() {
   }, [page, search, severity, source, status, activePill, updateBugListCache])
 
   const fetchBugs = useCallback(async (silent = false) => {
-    if (!silent && bugs.length === 0) {
+    const key = JSON.stringify({ page, page_size: 10, severity, source, status, search })
+    const now = Date.now()
+    const cached = bugsCache[key]
+    const isExpired = !cached || (now - cached.timestamp) >= 120000
+
+    if (cached) {
+      const { data } = cached
+      const nextGroups = data.groups || []
+      const allBugs = data.bugs || [
+        ...(data.ungrouped || []),
+        ...nextGroups.flatMap((g) => g.children || []),
+      ]
+      const nextFlatRows = nextGroups.length > 0 ? (data.ungrouped || []) : allBugs
+      setBugs(allBugs)
+      setGroups(nextGroups)
+      setFlatRows(nextFlatRows)
+      setTotal(data.total || 0)
+      setSourcesOnline(data.sources_online || 0)
+      setIsPartial(data.partial || false)
+      setLastSynced(new Date(cached.timestamp))
+      setCacheStatus(data.cache_status || 'hit')
+    }
+
+    if (!isExpired) return
+
+    if (!silent && !cached) {
       setLoading(true)
       pollCountRef.current = 0
     }
     try {
-      const data = await getBugs({ page, severity, source: source || undefined, status, search })
+      const data = await getBugs({ page, page_size: 10, severity, source: source || undefined, status, search })
+      bugsCache[key] = { data, timestamp: Date.now() }
       const nextGroups = data.groups || []
       const allBugs = data.bugs || [
         ...(data.ungrouped || []),
@@ -590,7 +625,7 @@ export default function BugListPage() {
     } catch (e) {
       console.error('Failed to fetch bugs', e)
     } finally {
-      if (!silent) setLoading(false)
+      if (!silent && !cached) setLoading(false)
     }
   }, [page, severity, source, status, search, activePill, bugs.length, updateBugListCache])
 
@@ -654,6 +689,10 @@ export default function BugListPage() {
   const handleRefresh = async () => {
     setRefreshing(true)
     try { await refreshBugCache() } catch { /* ignore */ }
+    
+    // Invalidate caches
+    for (const k in bugsCache) delete bugsCache[k]
+
     await new Promise((r) => setTimeout(r, 3000))
     await fetchBugs()
     setRefreshing(false)
@@ -938,11 +977,56 @@ export default function BugListPage() {
       )}
 
       {/* Pagination */}
-      {total > 50 && (
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 20 }}>
+      {total > 10 && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, marginTop: 20 }}>
           <button className="btn btn-ghost btn-sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>Previous</button>
-          <span style={{ padding: '5px 12px', fontSize: 13, color: 'var(--text2)', fontFamily: 'JetBrains Mono, monospace' }}>Page {page}</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => setPage((p) => p + 1)} disabled={bugs.length < 50}>Next</button>
+          
+          {(() => {
+            const totalPages = Math.ceil(total / 10)
+            const pages = []
+            
+            for (let i = 1; i <= totalPages; i++) {
+              if (i === 1 || i === totalPages || (i >= page - 2 && i <= page + 2)) {
+                pages.push(
+                  <button 
+                    key={i} 
+                    className={`btn btn-sm ${page === i ? 'btn-teal' : 'btn-ghost'}`}
+                    onClick={() => setPage(i)}
+                    style={{ minWidth: 32, padding: '4px 8px' }}
+                  >
+                    {i}
+                  </button>
+                )
+              } else if (i === page - 3 || i === page + 3) {
+                pages.push(<span key={i} style={{ color: 'var(--text3)' }}>...</span>)
+              }
+            }
+            return <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>{pages}</div>
+          })()}
+          
+          <button className="btn btn-ghost btn-sm" onClick={() => setPage((p) => Math.min(Math.ceil(total / 10), p + 1))} disabled={page >= Math.ceil(total / 10)}>Next</button>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 16, borderLeft: '1px solid var(--border)', paddingLeft: 16 }}>
+            <span style={{ fontSize: 13, color: 'var(--text2)' }}>Go to:</span>
+            <input 
+              type="number" 
+              className="form-input" 
+              style={{ width: 60, padding: '4px 8px', fontSize: 13 }}
+              value={pageInput}
+              onChange={(e) => setPageInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const p = parseInt(pageInput, 10)
+                  if (p >= 1 && p <= Math.ceil(total / 10)) {
+                    setPage(p)
+                    setPageInput('')
+                  }
+                }
+              }}
+              min={1}
+              max={Math.ceil(total / 10)}
+            />
+          </div>
         </div>
       )}
     </div>
