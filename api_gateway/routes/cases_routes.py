@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..auth import get_current_user, User
+from ..config import REDIS_TTL_BUGLIST_SECONDS
 from orchestrator.connectors.registry import ConnectorRegistry
 from orchestrator.redis_client import get_cached_buglist, cache_buglist
 from orchestrator.utils.url_utils import sanitize_bug_url
@@ -224,7 +225,7 @@ async def background_full_fetch(connector_list: list) -> None:
                 connector.search_open_bugs(
                     status="open",
                     severity="",
-                    max_results=300,
+                    max_results=120,
                 ),
                 timeout=20.0,
             )
@@ -236,7 +237,7 @@ async def background_full_fetch(connector_list: list) -> None:
                 ]
                 await cache_buglist(
                     connector.source_id, "open", "",
-                    data, ttl=120)
+                    data, ttl=REDIS_TTL_BUGLIST_SECONDS)
                 print(
                     f"[BackgroundFetch] {connector.source_id}: "
                     f"{len(data)} bugs cached", flush=True)
@@ -405,7 +406,8 @@ async def _fetch_buglist_for_connector(
                 for ticket in (tickets or [])
             ]
             await cache_buglist(
-                connector.source_id, status, severity, bugs, ttl=300)
+                connector.source_id, status, severity, bugs,
+                ttl=REDIS_TTL_BUGLIST_SECONDS)
             return {
                 "source_id": connector.source_id,
                 "bugs": bugs,
@@ -420,7 +422,7 @@ async def _fetch_buglist_for_connector(
                 "error": {
                     "source_id": connector.source_id,
                     "system_type": connector.system_type,
-                    "message": str(e)[:300],
+                    "message": str(e)[:120],
                 },
             }
 
@@ -431,7 +433,7 @@ async def _background_fetch_connector(connector) -> None:
             connector.search_open_bugs(
                 status="open",
                 severity="",
-                max_results=300,
+                max_results=120,
             ),
             timeout=90.0,
         )
@@ -444,7 +446,7 @@ async def _background_fetch_connector(connector) -> None:
 
             await cache_buglist(
                 connector.source_id, "open", "",
-                sanitized_data, ttl=300)
+                sanitized_data, ttl=REDIS_TTL_BUGLIST_SECONDS)
 
             print(f"[BugList] {connector.source_id}: "
                   f"{len(sanitized_data)} bugs cached")

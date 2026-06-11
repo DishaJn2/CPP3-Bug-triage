@@ -4,12 +4,17 @@ import redis.asyncio as aioredis
 import structlog
 from dotenv import load_dotenv
 
+from api_gateway.config import (
+    REDIS_TTL_BUGLIST_SECONDS,
+    REDIS_TTL_CASE_SECONDS,
+    REDIS_TTL_PANEL_SECONDS,
+    REDIS_TTL_TICKET_SECONDS,
+)
+
 load_dotenv()
 
 log = structlog.get_logger()
 _redis_client = None
-BUGLIST_CACHE_TTL_SECONDS = 120
-PANEL_TTL_SECONDS = 3600
 PANEL_ORDER = [
     "bug_context",
     "related_issues",
@@ -34,7 +39,7 @@ async def get_redis() -> aioredis.Redis:
     return _redis_client
 
 
-async def cache_ticket(source_id: str, ticket_id: str, data: dict, ttl: int = 300) -> None:
+async def cache_ticket(source_id: str, ticket_id: str, data: dict, ttl: int = REDIS_TTL_TICKET_SECONDS) -> None:
     try:
         r = await get_redis()
         key = f"ticket:{source_id}:{ticket_id}"
@@ -53,7 +58,7 @@ async def get_cached_ticket(source_id: str, ticket_id: str) -> dict | None:
         return None
 
 
-async def cache_buglist(source_id: str, status: str, severity: str, data: list, ttl: int = BUGLIST_CACHE_TTL_SECONDS) -> None:
+async def cache_buglist(source_id: str, status: str, severity: str, data: list, ttl: int = REDIS_TTL_BUGLIST_SECONDS) -> None:
     try:
         r = await get_redis()
         key = buglist_cache_key(source_id, status, severity)
@@ -99,7 +104,7 @@ async def store_panel_update(
         "data": data,
     })
     await r.setex(
-        f"panel:{case_id}:{panel_name}", PANEL_TTL_SECONDS, message)
+        f"panel:{case_id}:{panel_name}", REDIS_TTL_PANEL_SECONDS, message)
     existing = await r.lrange(f"panels:{case_id}", 0, -1)
     names = [
         item.decode() if isinstance(item, bytes) else item
@@ -107,7 +112,7 @@ async def store_panel_update(
     ]
     if panel_name not in names:
         await r.rpush(f"panels:{case_id}", panel_name)
-    await r.expire(f"panels:{case_id}", PANEL_TTL_SECONDS)
+    await r.expire(f"panels:{case_id}", REDIS_TTL_PANEL_SECONDS)
     return message
 
 
@@ -135,7 +140,7 @@ async def publish_pipeline_done(
         "error": error,
     })
     await r.setex(
-        f"panel:{case_id}:pipeline_done", PANEL_TTL_SECONDS, message)
+        f"panel:{case_id}:pipeline_done", REDIS_TTL_PANEL_SECONDS, message)
     existing = await r.lrange(f"panels:{case_id}", 0, -1)
     names = [
         item.decode() if isinstance(item, bytes) else item
@@ -143,7 +148,7 @@ async def publish_pipeline_done(
     ]
     if "pipeline_done" not in names:
         await r.rpush(f"panels:{case_id}", "pipeline_done")
-    await r.expire(f"panels:{case_id}", PANEL_TTL_SECONDS)
+    await r.expire(f"panels:{case_id}", REDIS_TTL_PANEL_SECONDS)
     await r.publish(f"ws:{case_id}", message)
     return message
 
@@ -190,7 +195,7 @@ async def get_stored_panels(case_id: str) -> list[dict]:
         return []
 
 
-async def cache_case_result(case_id: str, data: dict, ttl: int = 3600) -> None:
+async def cache_case_result(case_id: str, data: dict, ttl: int = REDIS_TTL_CASE_SECONDS) -> None:
     try:
         r = await get_redis()
         await r.setex(f"case:{case_id}", ttl, json.dumps(data))

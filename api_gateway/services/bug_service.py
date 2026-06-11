@@ -13,6 +13,8 @@ from orchestrator.db.models import AuditLog, BugGroupMapping, SystemGroupRegistr
 from orchestrator.db.repositories.audit_log import get_last_triage_for_bug
 from orchestrator.db.session import AsyncSessionLocal
 from orchestrator.redis_client import cache_buglist, get_cached_buglist
+
+from ..config import REDIS_TTL_BUGLIST_SECONDS
 from orchestrator.utils.url_utils import sanitize_bug_url
 
 _BUG_SOURCE_TYPES = {"github", "jira", "jira_apache", "bugzilla"}
@@ -272,7 +274,8 @@ async def _fetch_buglist_for_connector(
             for ticket in (tickets or [])
         ]
         await cache_buglist(
-            connector.source_id, status, severity, bugs, ttl=120)
+            connector.source_id, status, severity, bugs,
+            ttl=REDIS_TTL_BUGLIST_SECONDS)
         return {
             "source_id": connector.source_id,
             "bugs": bugs,
