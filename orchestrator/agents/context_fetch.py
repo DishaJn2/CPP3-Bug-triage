@@ -2,16 +2,11 @@ import asyncio
 import dataclasses
 import re
 import structlog
-
 from .base import BaseAgent
 from ..connectors.registry import ConnectorRegistry
-
 log = structlog.get_logger()
-
 MAX_DESC = 8000
 MAX_ERR  = 3000
-
-
 class ContextFetchAgent(BaseAgent):
     step_name = "context_fetch"
 

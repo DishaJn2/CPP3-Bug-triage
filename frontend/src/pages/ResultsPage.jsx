@@ -286,20 +286,12 @@ export default function ResultsPage() {
                 </div>
               </>
             )}
-            {(synthesis.engineer_summary || synthesis.customer_summary) && (
+            {synthesis.summary && (
               <div className="summaries-grid">
-                {synthesis.engineer_summary && (
-                  <div className="summary-card">
-                    <div className="summary-card-lbl">Engineer Summary</div>
-                    <p className="summary-card-txt">{synthesis.engineer_summary}</p>
-                  </div>
-                )}
-                {synthesis.customer_summary && (
-                  <div className="summary-card">
-                    <div className="summary-card-lbl">Customer Summary</div>
-                    <p className="summary-card-txt">{synthesis.customer_summary}</p>
-                  </div>
-                )}
+                <div className="summary-card">
+                  <div className="summary-card-lbl">Summary</div>
+                  <p className="summary-card-txt">{synthesis.summary}</p>
+                </div>
               </div>
             )}
           </div>

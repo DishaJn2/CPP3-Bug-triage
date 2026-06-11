@@ -19,8 +19,7 @@ SYNTHESIS_SCHEMA = """{
   "affected_components": ["string"],
   "root_cause": "string",
   "recommended_actions": ["string"],
-  "engineer_summary": "string",
-  "customer_summary": "string",
+  "summary": "string",
   "confidence": 0.0-1.0,
   "reasoning": "string",
   "used_fallback": false
@@ -145,12 +144,12 @@ class AISynthesisAgent(BaseAgent):
 
         context["synthesis"] = synthesis.model_dump()
 
-        # BUG2-B: persist synthesis result so re-triage within 1 h returns same scores
+        # BUG2-B: persist synthesis result so re-triage within 2min returns same scores
         if bug_id_ctx:
             try:
                 from ..redis_client import get_redis
                 _r = await get_redis()
-                await _r.setex(_cache_key, 3600,
+                await _r.setex(_cache_key, 120,
                                json.dumps(context["synthesis"]))
             except Exception:
                 pass
@@ -215,8 +214,7 @@ Respond with a JSON object matching this schema exactly:
 Guidelines:
 - unified_severity: determine based on impact, affected components, and related issues
 - confidence: 0.9+ if you have clear evidence, 0.6-0.9 if moderate evidence, <0.6 if uncertain
-- engineer_summary: technical details for the engineer
-- customer_summary: non-technical explanation for the customer
+- summary: A clear technical summary of the bug, its impact, and recommended next steps for the engineer.
 - recommended_actions: 3-5 specific actionable steps"""
 
     async def _resolve_group_id(self, context: dict,
@@ -283,8 +281,7 @@ Guidelines:
                 "Check recent commits touching the affected component",
                 "Review logs around the time of failure",
             ],
-            engineer_summary=f"Technical investigation needed for {title} in component {component}.",
-            customer_summary="Our team is investigating this issue and will provide updates shortly.",
+            summary=f"Technical investigation needed for {title} in component {component}.",
             confidence=0.3,
             reasoning="Fallback analysis — Groq synthesis unavailable.",
             used_fallback=True,

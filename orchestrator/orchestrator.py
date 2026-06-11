@@ -270,7 +270,7 @@ class TaskOrchestrator:
                     "confidence": synthesis.get("confidence"),
                     "root_cause": synthesis.get("root_cause", "")[:500],
                     "recommended_actions": synthesis.get("recommended_actions", [])[:3],
-                    "engineer_summary": synthesis.get("engineer_summary", "")[:500],
+                    "summary": synthesis.get("summary", "")[:500],
                     "status_summary": synthesis.get("status_summary", ""),
                     "ticket_updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
                     "ticket_severity": (context.get("primary_ticket") or {}).get("severity", ""),
