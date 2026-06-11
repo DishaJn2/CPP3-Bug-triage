@@ -101,6 +101,7 @@ async def assemble_grouped_bug_list(
             if entry.bug_id not in seen:
                 seen.add(entry.bug_id)
                 triage_map[entry.bug_id] = {
+                    "id": entry.id,
                     "case_id":   entry.case_id or "",
                     "severity":  (
                         (entry.summary or {}).get("severity")
@@ -405,9 +406,36 @@ async def get_bugs(
             if b.get("status", "").lower() == status.lower()
         ]
 
+    # Fetch triage timestamps for all candidate bugs BEFORE pagination
+    all_ticket_ids = {b.get("ticket_id") for b in all_bugs if b.get("ticket_id")}
+    triaged_timestamps = {}
+    if all_ticket_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(AuditLog.bug_id, AuditLog.created_at)
+                    .where(
+                        AuditLog.bug_id.in_(list(all_ticket_ids)),
+                        AuditLog.step == "pipeline_complete"
+                    )
+                    .order_by(AuditLog.bug_id, desc(AuditLog.created_at))
+                )
+                seen = set()
+                for row in result.all():
+                    if row.bug_id not in seen:
+                        seen.add(row.bug_id)
+                        triaged_timestamps[row.bug_id] = row.created_at.timestamp() if row.created_at else 0
+        except Exception as e:
+            print(f"[BugList] pre-fetch triage timestamps failed: {e}", flush=True)
+
+    # Sort triaged bugs first (descending by triage time), then by severity
     all_bugs.sort(
-        key=lambda b: SEVERITY_ORDER.get(
-            b.get("severity", "Unknown"), 4))
+        key=lambda b: (
+            0 if b.get("ticket_id") in triaged_timestamps else 1,
+            -triaged_timestamps.get(b.get("ticket_id"), 0),
+            SEVERITY_ORDER.get(b.get("severity", "Unknown"), 4)
+        )
+    )
     total     = len(all_bugs)
     start_idx = (page - 1) * page_size
     page_bugs = all_bugs[start_idx: start_idx + page_size]
@@ -647,6 +675,7 @@ async def get_bug_status(bug_id: str) -> dict:
         "last_confidence":  last_confidence,
         "root_cause":       root_cause,
         "case_id":          last_triage.case_id,
+        "id":               last_triage.id,
         "changes":          changes,
         "needs_retriage":   True,
     }

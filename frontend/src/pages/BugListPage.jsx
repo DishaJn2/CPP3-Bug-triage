@@ -253,7 +253,7 @@ function ExpandableBugRow({ bug, onTriage, triaging, navigate }) {
   )
 }
 
-function GroupTreeRow({ group, onTriage, triaging }) {
+function GroupTreeRow({ group, onTriage, triaging, navigate, onRetriage }) {
   const root = getGroupRoot(group)
   const children = getGroupChildren(group)
   const groupId = group.group_id || root?.ticket_id || group.id || 'group'
@@ -263,15 +263,30 @@ function GroupTreeRow({ group, onTriage, triaging }) {
 
   const sourceType = getSourceType(root)
   const rootUrl = root.url || ''
+  
+  const triage = root.triage_info || {}
+  const isTriaged = root.is_triaged || false
+  const toPercent = (s) => s == null ? 0 : s > 1 ? Math.min(Math.round(s), 100) : Math.min(Math.round(s * 100), 100)
+  const confPct = triage.confidence != null ? toPercent(triage.confidence) : null
+  const caseIdShort = triage.id ? `BT-${String(triage.id).padStart(3, '0')}` : triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
+  
+  const triageTimeMs = new Date(triage.triaged_at).getTime()
+  const isExpired = !isNaN(triageTimeMs) && (Date.now() - triageTimeMs > 120000)
+
+  const handleView = (e) => {
+    e.stopPropagation()
+    if (triage.case_id) navigate(`/triage/${triage.case_id}?from=history`)
+  }
 
   return (
-    <div className="tree-group" style={{ border: '1px solid var(--border)', background: 'var(--white)' }}>
+    <div className="tree-group" style={{ border: '1px solid var(--border)', borderLeft: isTriaged ? '4px solid var(--teal)' : '1px solid var(--border)', background: 'var(--white)' }}>
       <div
         className="tree-root"
         style={{ border: 'none', borderRadius: 0 }}
         onClick={() => setOpen((v) => !v)}
       >
         <span className={`expand-arrow${open ? ' open' : ''}`}>▶</span>
+        {isTriaged && <span className="bt-badge">{caseIdShort}</span>}
         <span className="bt-badge">Root / Primary</span>
         <SrcBadge type={sourceType} />
         {rootUrl ? (
@@ -288,16 +303,41 @@ function GroupTreeRow({ group, onTriage, triaging }) {
           <span className="raw-id">{root.ticket_id}</span>
         )}
         <span className="bug-flat-title">{root.title || group.title || 'Grouped issue'}</span>
-        <SevBadge sev={root.severity || group.priority} />
+        <SevBadge sev={triage.severity || root.severity || group.priority} />
+        {isTriaged && confPct != null && (
+          <span className="match-badge match-h">{confPct}%</span>
+        )}
         <span className="bug-status-pill">{root.status || group.status || 'open'}</span>
         <span className="match-badge match-m">{children.length} Related</span>
-        <button
-          className="btn btn-teal btn-sm"
-          onClick={(e) => { e.stopPropagation(); onTriage(root) }}
-          disabled={triaging === root.ticket_id}
-        >
-          {triaging === root.ticket_id ? '...' : '▶ Triage'}
-        </button>
+        {isTriaged ? (
+          isExpired ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, color: 'var(--orange)', fontWeight: 600, padding: '4px 8px', background: 'var(--orange-lt)', borderRadius: 4 }}>Triage expired</span>
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={(e) => { e.stopPropagation(); onRetriage(root.ticket_id); }}
+                disabled={triaging === root.ticket_id}
+              >
+                {triaging === root.ticket_id ? '…' : 'Re-triage'}
+              </button>
+            </div>
+          ) : (
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={handleView}
+            >
+              View Previous Results
+            </button>
+          )
+        ) : (
+          <button
+            className="btn btn-teal btn-sm"
+            onClick={(e) => { e.stopPropagation(); onTriage(root) }}
+            disabled={triaging === root.ticket_id}
+          >
+            {triaging === root.ticket_id ? '...' : '▶ Triage'}
+          </button>
+        )}
       </div>
 
       {open && (
@@ -353,11 +393,14 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   const triage = bug.triage_info || {}
   const confPct = triage.confidence != null ? toPercent(triage.confidence) : null
   const triagedAt = fmtDate(triage.triaged_at)
-  const caseIdShort = triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
+  const caseIdShort = triage.id ? `BT-${String(triage.id).padStart(3, '0')}` : triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
   const systems = triage.systems_queried || []
   const statusCaseId = status?.case_id || triage.case_id
   const statusConfPct = status?.last_confidence != null ? toPercent(status.last_confidence) : confPct
   const statusTriagedAt = fmtDate(status?.last_triaged_at || triage.triaged_at)
+
+  const triageTimeMs = new Date(status?.last_triaged_at || triage.triaged_at).getTime()
+  const isExpired = !isNaN(triageTimeMs) && (Date.now() - triageTimeMs > 120000)
 
   const fetchStatus = async () => {
     setStatusLoading(true)
@@ -414,14 +457,25 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
         )}
         <StatusBadge status={status} loading={statusLoading} error={statusError} />
         <span className="bug-flat-time">{triagedAt}</span>
-        {statusCaseId && (
+        {isExpired ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--orange)', fontWeight: 600, padding: '4px 8px', background: 'var(--orange-lt)', borderRadius: 4 }}>Triage expired</span>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id); }}
+              disabled={retriaging === bug.ticket_id}
+            >
+              {retriaging === bug.ticket_id ? '…' : 'Re-triage'}
+            </button>
+          </div>
+        ) : statusCaseId ? (
           <button
             className="btn btn-outline btn-sm"
             onClick={handleView}
           >
             View Previous Results
           </button>
-        )}
+        ) : null}
       </div>
 
       {/* Expanded children — AI analysis */}
@@ -431,6 +485,25 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
             <div style={{ padding: '12px 24px', display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div className="skeleton-pulse" style={{ width: 180, height: 13, borderRadius: 3 }} />
               <div className="skeleton-pulse" style={{ width: 120, height: 13, borderRadius: 3 }} />
+            </div>
+          ) : isExpired ? (
+            <div style={{ padding: '12px 24px' }}>
+              <div style={{
+                background: 'var(--orange-lt)', border: '1px solid var(--orange-bd)',
+                borderRadius: 7, padding: '9px 12px', marginBottom: 10, fontSize: 12, color: 'var(--orange)',
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠ Triage Expired</div>
+                <div style={{ marginLeft: 8 }}>The detailed AI analysis for this bug has expired from the active cache. Please run a fresh triage.</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                <button
+                  className="btn btn-teal btn-sm"
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
+                  disabled={retriaging === bug.ticket_id}
+                >
+                  {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
+                </button>
+              </div>
             </div>
           ) : statusError || status?.needs_retriage == null ? (
             <div style={{ padding: '12px 24px' }}>
@@ -459,7 +532,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                 <button
                   className="btn btn-teal btn-sm"
-                  onClick={(e) => { e.stopPropagation(); onRetriage(bug, true) }}
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
                   disabled={retriaging === bug.ticket_id}
                 >
                   {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
@@ -473,7 +546,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                 <button
                   className="btn btn-outline btn-sm"
-                  onClick={(e) => { e.stopPropagation(); onRetriage(bug, true) }}
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
                   disabled={retriaging === bug.ticket_id}
                 >
                   {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
@@ -967,21 +1040,12 @@ export default function BugListPage() {
                   group={group}
                   onTriage={handleTriage}
                   triaging={triagingId}
+                  navigate={navigate}
+                  onRetriage={(bugId) => handleTriage(bugId, true)}
                 />
               ))}
             </div>
           )}
-
-          {/* Untriaged bugs first — flat expandable rows */}
-          {untriagedBugs.map((bug, idx) => (
-            <ExpandableBugRow
-              key={`${bug.ticket_id}-${idx}`}
-              bug={bug}
-              onTriage={handleTriage}
-              triaging={triagingId}
-              navigate={navigate}
-            />
-          ))}
 
           {/* Triaged bugs — tree rows with AI analysis children */}
           {triagedBugs.map((bug, idx) => (
@@ -990,6 +1054,17 @@ export default function BugListPage() {
               bug={bug}
               onRetriage={(b, fr) => handleTriage(b, fr)}
               retriaging={triagingId}
+              navigate={navigate}
+            />
+          ))}
+
+          {/* Untriaged bugs first — flat expandable rows */}
+          {untriagedBugs.map((bug, idx) => (
+            <ExpandableBugRow
+              key={`${bug.ticket_id}-${idx}`}
+              bug={bug}
+              onTriage={handleTriage}
+              triaging={triagingId}
               navigate={navigate}
             />
           ))}

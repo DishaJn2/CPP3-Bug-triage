@@ -107,6 +107,7 @@ async def get_triage_result(case_id: str) -> dict:
             summary = entry.summary or {}
             return {
                 "case_id": case_id,
+                "id": entry.id,
                 "bug_id": entry.bug_id,
                 "source_id": entry.source_id,
                 "from_cache": False,

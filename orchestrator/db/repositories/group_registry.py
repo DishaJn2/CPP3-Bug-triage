@@ -210,4 +210,14 @@ async def persist_related_issue_group(
         ))
 
     await db.commit()
+    
+    # Touch updated_at on the SystemGroupRegistry to reset the 30-min expiration
+    from sqlalchemy import func
+    await db.execute(
+        update(SystemGroupRegistry)
+        .where(SystemGroupRegistry.group_id == group_id)
+        .values(updated_at=func.now())
+    )
+    await db.commit()
+
     return group_id
