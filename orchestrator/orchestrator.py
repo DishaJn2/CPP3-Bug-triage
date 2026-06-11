@@ -15,17 +15,50 @@ from .redis_client import (
     store_panel_update,
     publish_pipeline_done,
 )
+from api_gateway.config import (
+    REDIS_TTL_CASE_SECONDS,
+    REDIS_TTL_RELATED_SECONDS,
+)
 
 log = structlog.get_logger()
 
+_stale_sweep_started = False
+
 
 class TaskOrchestrator:
-    async def run(self, case_id: str, bug_id: str, source_id: str, engineer_id: str, force_refresh: bool = False) -> None:
-        # Give the frontend 1.5 s to open WebSocket and subscribe before we start
-        # publishing panels. This prevents the race condition where Panel 1 is
-        # published before anyone is listening.
-        await asyncio.sleep(1.5)
+    # pipeline_context rows untouched for longer than this are crash
+    # orphans (live pipelines refresh updated_at at every checkpoint)
+    STALE_CONTEXT_MAX_AGE_MINUTES = 10
 
+    def __init__(self) -> None:
+        # Startup sweep (once per process): reap pipeline_context rows
+        # orphaned by a previous crash. Crash rows must survive until
+        # this sweep, so run() never deletes them on cancellation.
+        global _stale_sweep_started
+        if _stale_sweep_started:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # constructed outside an event loop (e.g. tests)
+        _stale_sweep_started = True
+        loop.create_task(self._sweep_stale_contexts())
+
+    async def run(self, case_id: str, bug_id: str, source_id: str, engineer_id: str, force_refresh: bool = False) -> None:
+        start_time = time.monotonic()
+        try:
+            await self._run_pipeline(
+                case_id, bug_id, source_id, engineer_id, force_refresh)
+        except Exception as e:
+            # Agent failures never propagate (BaseAgent.safe_run absorbs
+            # them), so anything reaching here is an infrastructure
+            # failure. CancelledError is a BaseException and intentionally
+            # not caught: a killed process keeps its row for the sweep.
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await self._handle_infrastructure_failure(
+                case_id, bug_id, source_id, engineer_id, e, duration_ms)
+
+    async def _run_pipeline(self, case_id: str, bug_id: str, source_id: str, engineer_id: str, force_refresh: bool = False) -> None:
         start_time = time.monotonic()
         context = {
             "case_id": case_id,
@@ -270,8 +303,7 @@ class TaskOrchestrator:
                     "confidence": synthesis.get("confidence"),
                     "root_cause": synthesis.get("root_cause", "")[:500],
                     "recommended_actions": synthesis.get("recommended_actions", [])[:3],
-                    "engineer_summary": synthesis.get("engineer_summary", "")[:500],
-                    "status_summary": synthesis.get("status_summary", ""),
+                    "summary": synthesis.get("summary", "")[:500],
                     "ticket_updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
                     "ticket_severity": (context.get("primary_ticket") or {}).get("severity", ""),
                     "ticket_status": (context.get("primary_ticket") or {}).get("status", ""),
@@ -291,11 +323,75 @@ class TaskOrchestrator:
         # the next GET /bugs reflects the new triage_info.
         try:
             _r = await get_redis()
-            _keys = await _r.keys("bug_list:*")
+            _keys = await _r.keys("buglist:*")
             if _keys:
                 await _r.delete(*_keys)
         except Exception:
             pass  # cache invalidation must never crash the pipeline
+
+    async def _handle_infrastructure_failure(self, case_id: str, bug_id: str,
+                                             source_id: str, engineer_id: str,
+                                             error: Exception,
+                                             duration_ms: int) -> None:
+        log.error("Pipeline infrastructure failure",
+                  case_id=case_id, bug_id=bug_id, error=str(error))
+
+        # 1. Delete pipeline_context immediately — it holds full bug content
+        try:
+            async with AsyncSessionLocal() as db:
+                await delete_pipeline_context(db, case_id)
+        except Exception as e:
+            log.warning("Infra failure: context delete failed",
+                        case_id=case_id, error=str(e))
+
+        # 2. Push error panel to the WebSocket (stored + published)
+        try:
+            await publish_pipeline_done(
+                case_id=case_id,
+                status="failed",
+                duration_ms=duration_ms,
+                error=str(error)[:300],
+            )
+        except Exception as e:
+            log.warning("Infra failure: error panel publish failed",
+                        case_id=case_id, error=str(e))
+
+        # 3. Write failed status to audit_log
+        try:
+            async with AsyncSessionLocal() as db:
+                await insert_audit_entry(db, {
+                    "case_id": case_id,
+                    "bug_id": bug_id,
+                    "source_id": source_id,
+                    "engineer_id": engineer_id,
+                    "step": "pipeline_failed",
+                    "status": "failed",
+                    "summary": {"error": str(error)[:300]},
+                    "duration_ms": duration_ms,
+                })
+        except Exception as e:
+            log.warning("Infra failure: audit write failed",
+                        case_id=case_id, error=str(e))
+
+    async def _sweep_stale_contexts(self) -> None:
+        try:
+            from datetime import datetime, timedelta, timezone
+            from sqlalchemy import delete as sql_delete
+            from .db.models import PipelineContext
+
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=self.STALE_CONTEXT_MAX_AGE_MINUTES)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    sql_delete(PipelineContext).where(
+                        PipelineContext.updated_at < cutoff))
+                await db.commit()
+            if result.rowcount:
+                log.info("Swept stale pipeline_context rows",
+                         count=result.rowcount,
+                         older_than_minutes=self.STALE_CONTEXT_MAX_AGE_MINUTES)
+        except Exception as e:
+            log.warning("Stale pipeline_context sweep failed", error=str(e))
 
     async def _checkpoint(self, case_id: str, step: str, context: dict) -> None:
         try:

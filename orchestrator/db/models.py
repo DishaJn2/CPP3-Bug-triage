@@ -139,7 +139,6 @@ class BugGroupMapping(Base):
     similarity_label:  Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     similarity_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at:    Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=utcnow)
-
     __table_args__ = (
         UniqueConstraint("raw_ticket_id", "source_id",
                          name="uq_bug_group_ticket"),

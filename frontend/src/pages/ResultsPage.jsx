@@ -286,20 +286,25 @@ export default function ResultsPage() {
                 </div>
               </>
             )}
-            {(synthesis.engineer_summary || synthesis.customer_summary) && (
+            {synthesis.affected_components?.length > 0 && (
+              <>
+                <div className="sec-label">Affected Components</div>
+                <div className="teams-wrap">
+                  {synthesis.affected_components.map((c, i) => {
+                    const tc = TEAM_COLORS[(i + 2) % TEAM_COLORS.length]
+                    return (
+                      <span key={i} className="team-tag" style={{ background: tc.bg, color: tc.color, border: `1px solid ${tc.bd}` }}>{c}</span>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+            {synthesis.summary && (
               <div className="summaries-grid">
-                {synthesis.engineer_summary && (
-                  <div className="summary-card">
-                    <div className="summary-card-lbl">Engineer Summary</div>
-                    <p className="summary-card-txt">{synthesis.engineer_summary}</p>
-                  </div>
-                )}
-                {synthesis.customer_summary && (
-                  <div className="summary-card">
-                    <div className="summary-card-lbl">Customer Summary</div>
-                    <p className="summary-card-txt">{synthesis.customer_summary}</p>
-                  </div>
-                )}
+                <div className="summary-card">
+                  <div className="summary-card-lbl">Summary</div>
+                  <p className="summary-card-txt">{synthesis.summary}</p>
+                </div>
               </div>
             )}
           </div>
