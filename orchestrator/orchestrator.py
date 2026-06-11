@@ -21,11 +21,6 @@ log = structlog.get_logger()
 
 class TaskOrchestrator:
     async def run(self, case_id: str, bug_id: str, source_id: str, engineer_id: str, force_refresh: bool = False) -> None:
-        # Give the frontend 1.5 s to open WebSocket and subscribe before we start
-        # publishing panels. This prevents the race condition where Panel 1 is
-        # published before anyone is listening.
-        await asyncio.sleep(1.5)
-
         start_time = time.monotonic()
         context = {
             "case_id": case_id,
