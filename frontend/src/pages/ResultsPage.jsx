@@ -92,7 +92,7 @@ export default function ResultsPage() {
   const ticket     = ctx.primary_ticket || {}
   const conf       = toPercent(synthesis.confidence)
   const sevBlockCls = { P0: 'p0-b', P1: 'p1-b', P2: 'p2-b', P3: 'p3-b' }[synthesis.unified_severity] || 'p3-b'
-  const caseShort  = `BT-${caseId.slice(-5).toUpperCase()}`
+  const caseShort  = result.id ? `BT-${String(result.id).padStart(3, '0')}` : `BT-${caseId.slice(0, 6).toUpperCase()}`
   const srcType    = ticket.system_type || ticket.source
   const customerSignals = ticket.customer_signals || ctx.customer_signals || ctx.customer_cases || []
 
