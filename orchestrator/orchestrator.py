@@ -226,13 +226,13 @@ class TaskOrchestrator:
                 import json as _json
                 _r = await get_redis()
                 await _r.setex(
-                    f"related:{case_id}", REDIS_TTL_RELATED_SECONDS,
+                    f"related:{case_id}", 120,
                     _json.dumps(context.get("related_tickets") or []))
                 await _r.setex(
-                    f"enrichment:{case_id}", REDIS_TTL_RELATED_SECONDS,
+                    f"enrichment:{case_id}", 120,
                     _json.dumps(context.get("enrichment_sources") or []))
                 await _r.setex(
-                    f"kb:{case_id}", REDIS_TTL_RELATED_SECONDS,
+                    f"kb:{case_id}", 120,
                     _json.dumps(context.get("kb_articles") or []))
             except Exception:
                 pass
