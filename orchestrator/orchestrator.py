@@ -43,6 +43,7 @@ class TaskOrchestrator:
             return  # constructed outside an event loop (e.g. tests)
         _stale_sweep_started = True
         loop.create_task(self._sweep_stale_contexts())
+        loop.create_task(self._sweep_stale_groups())
 
     async def run(self, case_id: str, bug_id: str, source_id: str, engineer_id: str, force_refresh: bool = False) -> None:
         start_time = time.monotonic()
@@ -282,15 +283,8 @@ class TaskOrchestrator:
         log.info("Pipeline complete", case_id=case_id, duration_ms=total_ms)
 
         # DB writes happen after WebSocket is notified
-        await cache_case_result(case_id, {
-            "case_id": case_id,
-            "bug_id": bug_id,
-            "source_id": source_id,
-            "context": context,
-        }, ttl=120)
-
         async with AsyncSessionLocal() as db:
-            await insert_audit_entry(db, {
+            db_entry = await insert_audit_entry(db, {
                 "case_id": case_id,
                 "bug_id": bug_id,
                 "source_id": source_id,
@@ -299,25 +293,23 @@ class TaskOrchestrator:
                 "status": "done",
                 "summary": {
                     "severity": synthesis.get("unified_severity"),
-                    "ai_severity": synthesis.get("unified_severity"),
                     "confidence": synthesis.get("confidence"),
                     "root_cause": synthesis.get("root_cause", "")[:500],
-                    "recommended_actions": synthesis.get("recommended_actions", [])[:3],
-                    "summary": synthesis.get("summary", "")[:500],
-                    "ticket_updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
-                    "ticket_severity": (context.get("primary_ticket") or {}).get("severity", ""),
-                    "ticket_status": (context.get("primary_ticket") or {}).get("status", ""),
-                    "updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
                     "status": (context.get("primary_ticket") or {}).get("status", ""),
-                    "used_fallback": synthesis.get("used_fallback", False),
-                    "group_id": context.get("group_id"),
-                    "related_tickets": self._audit_related_tickets(
-                        context.get("related_tickets") or []),
+                    "updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
                 },
                 "systems_queried": context.get("sources_queried", []),
                 "duration_ms": total_ms,
             })
             await delete_pipeline_context(db, case_id)
+            
+        await cache_case_result(case_id, {
+            "case_id": case_id,
+            "id": db_entry.id,
+            "bug_id": bug_id,
+            "source_id": source_id,
+            "context": context,
+        }, ttl=REDIS_TTL_CASE_SECONDS)
 
         # Invalidate bug list cache after triage completes so
         # the next GET /bugs reflects the new triage_info.
@@ -392,6 +384,42 @@ class TaskOrchestrator:
                          older_than_minutes=self.STALE_CONTEXT_MAX_AGE_MINUTES)
         except Exception as e:
             log.warning("Stale pipeline_context sweep failed", error=str(e))
+
+    async def _sweep_stale_groups(self) -> None:
+        try:
+            from datetime import datetime, timedelta, timezone
+            from sqlalchemy import delete as sql_delete, select
+            from .db.models import SystemGroupRegistry, BugGroupMapping
+
+            while True:
+                try:
+                    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+                    async with AsyncSessionLocal() as db:
+                        stale_query = select(SystemGroupRegistry.group_id).where(
+                            SystemGroupRegistry.updated_at < cutoff)
+                        result = await db.execute(stale_query)
+                        stale_ids = [row[0] for row in result.all()]
+
+                        if stale_ids:
+                            # 1. Delete mappings
+                            await db.execute(
+                                sql_delete(BugGroupMapping).where(
+                                    BugGroupMapping.group_id.in_(stale_ids)
+                                )
+                            )
+                            # 2. Delete registry groups
+                            await db.execute(
+                                sql_delete(SystemGroupRegistry).where(
+                                    SystemGroupRegistry.group_id.in_(stale_ids)
+                                )
+                            )
+                            await db.commit()
+                            log.info("Swept stale bug groups", count=len(stale_ids))
+                except Exception as e:
+                    log.warning("Stale bug group sweep iteration failed", error=str(e))
+                await asyncio.sleep(60) # check every minute
+        except Exception as e:
+            log.warning("Stale bug group sweep failed", error=str(e))
 
     async def _checkpoint(self, case_id: str, step: str, context: dict) -> None:
         try:

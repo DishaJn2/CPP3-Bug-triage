@@ -62,10 +62,10 @@ export default function HistoryPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const handleRetriage = async (bugId) => {
+  const handleRetriage = async (bugId, sourceId) => {
     setRetriagingId(bugId)
     try {
-      const data = await startTriage(bugId)
+      const data = await startTriage(bugId, sourceId)
       navigate(`/triage/${data.case_id}`)
     } catch (e) {
       alert('Failed to start triage: ' + (e.response?.data?.detail || e.message))
@@ -120,7 +120,7 @@ export default function HistoryPage() {
           <table className="hist-table">
             <thead>
               <tr>
-                {['Bug ID', 'Source', 'Severity', 'Confidence', 'Root Cause', 'Duration', 'Triaged At', 'Actions'].map((h) => (
+                {['Triage ID', 'Bug ID', 'Source', 'Severity', 'Confidence', 'Root Cause', 'Duration', 'Triaged At', 'Actions'].map((h) => (
                   <th key={h} className="hist-th">{h}</th>
                 ))}
               </tr>
@@ -130,8 +130,13 @@ export default function HistoryPage() {
                 const toPercent = (s) => s == null ? 0 : s > 1 ? Math.min(Math.round(s), 100) : Math.min(Math.round(s * 100), 100)
                 const confVal = entry.confidence != null ? toPercent(entry.confidence) : null
                 const rootCause = (entry.root_cause || '').slice(0, 80) + ((entry.root_cause || '').length > 80 ? '…' : '')
+                const triageTimeMs = new Date(entry.triaged_at).getTime()
+                const isExpired = !isNaN(triageTimeMs) && (Date.now() - triageTimeMs > 120000)
                 return (
                   <tr key={entry.id} className="hist-tr">
+                    <td className="hist-td">
+                      <span className="bt-badge">{`BT-${String(entry.id).padStart(3, '0')}`}</span>
+                    </td>
                     <td className="hist-td hist-mono" style={{ color: 'var(--teal)', fontWeight: 700 }}>
                       {entry.bug_id || '—'}
                     </td>
@@ -154,7 +159,7 @@ export default function HistoryPage() {
                         : <span style={{ color: 'var(--text3)' }}>—</span>
                       }
                     </td>
-                    <td className="hist-td" style={{ fontSize: 12, color: 'var(--text3)', fontStyle: 'italic', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <td className="hist-td" title={entry.root_cause || ''} style={{ fontSize: 12, color: 'var(--text3)', fontStyle: 'italic', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {rootCause || '—'}
                     </td>
                     <td className="hist-td hist-mono">
@@ -165,15 +170,19 @@ export default function HistoryPage() {
                     </td>
                     <td className="hist-td">
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'nowrap' }}>
-                        <button
-                          className="btn btn-outline btn-sm"
-                          onClick={() => handleView(entry.case_id)}
-                        >
-                          View Results
-                        </button>
+                        {isExpired ? (
+                          <span style={{ fontSize: 11, color: 'var(--orange)', fontWeight: 600, padding: '4px 8px', background: 'var(--orange-lt)', borderRadius: 4, display: 'flex', alignItems: 'center' }}>Triage expired</span>
+                        ) : (
+                          <button
+                            className="btn btn-outline btn-sm"
+                            onClick={() => handleView(entry.case_id)}
+                          >
+                            View Results
+                          </button>
+                        )}
                         <button
                           className="btn btn-ghost btn-sm"
-                          onClick={() => handleRetriage(entry.bug_id)}
+                          onClick={() => handleRetriage(entry.bug_id, entry.source_id)}
                           disabled={retriagingId === entry.bug_id}
                         >
                           {retriagingId === entry.bug_id ? '…' : 'Re-triage'}
