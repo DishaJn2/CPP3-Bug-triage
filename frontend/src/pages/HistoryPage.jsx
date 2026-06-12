@@ -62,10 +62,10 @@ export default function HistoryPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const handleRetriage = async (bugId) => {
+  const handleRetriage = async (bugId, sourceId) => {
     setRetriagingId(bugId)
     try {
-      const data = await startTriage(bugId)
+      const data = await startTriage(bugId, sourceId)
       navigate(`/triage/${data.case_id}`)
     } catch (e) {
       alert('Failed to start triage: ' + (e.response?.data?.detail || e.message))
@@ -141,6 +141,9 @@ export default function HistoryPage() {
                           {entry.source_id.includes('github') ? 'GH' : entry.source_id.includes('bugzilla') ? 'BZ' : entry.source_id.includes('confluence') ? 'CF' : 'JIRA'}
                         </span>
                       ) : <span style={{ color: 'var(--text3)' }}>—</span>}
+                      {(entry.triage_successful === false || entry.status === 'failed') && (
+                        <span className="sev sev-p0" style={{ marginLeft: 6 }}>Failed</span>
+                      )}
                     </td>
                     <td className="hist-td">
                       {entry.severity
@@ -173,7 +176,7 @@ export default function HistoryPage() {
                         </button>
                         <button
                           className="btn btn-ghost btn-sm"
-                          onClick={() => handleRetriage(entry.bug_id)}
+                          onClick={() => handleRetriage(entry.bug_id, entry.source_id)}
                           disabled={retriagingId === entry.bug_id}
                         >
                           {retriagingId === entry.bug_id ? '…' : 'Re-triage'}

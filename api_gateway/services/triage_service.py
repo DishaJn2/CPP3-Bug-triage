@@ -41,15 +41,15 @@ async def start_triage(
             if prefix and bug_id.upper().startswith(prefix + "-"):
                 source_id = src.source_id
                 break
-        # For numeric IDs without prefix, use first GitHub connector
+        # Numeric IDs (GitHub issues, Bugzilla bugs) are ambiguous across
+        # sources — guessing a source routes the fetch to the wrong system,
+        # so require the caller to supply source_id instead.
         if not source_id:
-            for src in sources:
-                if src.system_type == "github" and bug_id.isdigit():
-                    source_id = src.source_id
-                    break
-        # Last resort: first enabled source
-        if not source_id and sources:
-            source_id = sources[0].source_id
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Cannot determine source for bug ID '{bug_id}' "
+                        "without source_id"),
+            )
 
     if not source_id:
         raise HTTPException(status_code=400, detail="No source system configured")

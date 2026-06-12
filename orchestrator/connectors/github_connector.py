@@ -1,10 +1,11 @@
 import re
 import httpx
 import asyncio
+import structlog
 from .base_connector import BaseConnector
 from ..models.ticket import TicketData, ChangeEvent
 
-
+log = structlog.get_logger()
 SEVERITY_LABEL_MAP = {
     "priority:blocker": "P0",
     "priority:critical": "P0",
@@ -14,13 +15,17 @@ SEVERITY_LABEL_MAP = {
     "bug": "P2",
     "enhancement": "P3",
 }
-
 SKIP_LABELS = {
     "bug", "enhancement", "question", "good first issue",
     "help wanted", "wontfix", "duplicate", "invalid",
 }
-
-
+# UI severity level → GitHub labels (either label matches)
+SEVERITY_FILTER_LABELS = {
+    "P0": ("priority:P0", "severity:critical"),
+    "P1": ("priority:P1", "severity:major"),
+    "P2": ("priority:P2", "severity:minor"),
+    "P3": ("priority:P3", "severity:trivial"),
+}
 class GithubConnector(BaseConnector):
     def _headers(self) -> dict:
         h = {
@@ -91,7 +96,33 @@ class GithubConnector(BaseConnector):
                 ticket = self._normalise(raw_data)
                 ticket.direct_reference_links = self.extract_links(raw_data)
                 return ticket
-        except Exception:
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            # Rate-limit / auth / server errors must stay visible — a
+            # silent None here is indistinguishable from "not found"
+            self.last_error = {
+                "source": self.source_id,
+                "ticket_id": ticket_id,
+                "status": e.response.status_code,
+                "error": str(e)[:300],
+            }
+            log.warning("GitHub get failed",
+                        source=self.source_id,
+                        ticket_id=ticket_id,
+                        status=e.response.status_code,
+                        error=str(e)[:300])
+            return None
+        except Exception as e:
+            self.last_error = {
+                "source": self.source_id,
+                "ticket_id": ticket_id,
+                "error": str(e)[:300],
+            }
+            log.warning("GitHub get failed",
+                        source=self.source_id,
+                        ticket_id=ticket_id,
+                        error=str(e)[:300])
             return None
 
     async def search(self, query: str, max_results: int = 300, page: int = 1) -> list[TicketData]:
@@ -135,6 +166,62 @@ class GithubConnector(BaseConnector):
                 return [self._normalise(i) for i in all_raw_items if i.get("pull_request") is None]
         except Exception as e:
             print(f"[GITHUB] Search error: {e}")
+            return []
+
+    async def search_open_bugs(
+            self,
+            status: str = "open",
+            severity: str = "",
+            max_results: int = 300,
+            **kwargs) -> list[TicketData]:
+        status_key = (status or "").strip().lower()
+        label_filters = []
+        if status_key == "in_progress":
+            state = "open"
+            label_filters.append('label:"status:in-progress"')
+        elif status_key == "resolved":
+            state = "closed"
+        else:  # open / all / empty → default open filter
+            state = "open"
+
+        severity_labels = SEVERITY_FILTER_LABELS.get(
+            (severity or "").strip().upper())
+        if severity_labels:
+            # comma inside one label: qualifier = logical OR on GitHub search
+            label_filters.append(
+                'label:' + ','.join(f'"{lbl}"' for lbl in severity_labels))
+
+        if state == "open" and not label_filters:
+            # No filters → identical to the previous unfiltered behavior
+            return await self.search("", max_results=max_results)
+
+        q = " ".join(
+            [f"repo:{self._repo()}", "is:issue", f"state:{state}"]
+            + label_filters)
+        per_page = 100
+        MAX_PAGES = 10  # GitHub search API caps at 1000 results
+
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                all_raw_items = []
+                for p in range(1, MAX_PAGES + 1):
+                    resp = await client.get(
+                        "https://api.github.com/search/issues",
+                        headers=self._headers(),
+                        params={"q": q, "per_page": per_page, "page": p,
+                                "sort": "updated", "order": "desc"})
+                    if resp.status_code != 200:
+                        break
+                    items = resp.json().get("items", [])
+                    if not isinstance(items, list):
+                        break
+                    all_raw_items.extend(items)
+                    if len(items) < per_page or len(all_raw_items) >= max_results:
+                        break
+                return [self._normalise(i) for i in all_raw_items
+                        if i.get("pull_request") is None]
+        except Exception as e:
+            print(f"[GITHUB] search_open_bugs error: {e}")
             return []
 
     async def get_linked_items(self, ticket_id: str) -> list[dict]:

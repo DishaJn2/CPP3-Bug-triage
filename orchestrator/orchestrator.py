@@ -278,7 +278,19 @@ class TaskOrchestrator:
 
         # Publish pipeline_complete IMMEDIATELY — before DB writes
         # so WebSocket receives it before it can disconnect
-        await self._publish_complete(case_id, synthesis, total_ms)
+        if not self._has_primary_ticket(context):
+            try:
+                await publish_pipeline_done(
+                    case_id=case_id,
+                    status="failed",
+                    duration_ms=total_ms,
+                    error=("Ticket not found in source system — "
+                           "retriage may have used wrong source"),
+                )
+            except Exception as e:
+                log.warning("publish_complete failed", error=str(e))
+        else:
+            await self._publish_complete(case_id, synthesis, total_ms)
         log.info("Pipeline complete", case_id=case_id, duration_ms=total_ms)
 
         # DB writes happen after WebSocket is notified
@@ -290,33 +302,54 @@ class TaskOrchestrator:
         }, ttl=120)
 
         async with AsyncSessionLocal() as db:
-            await insert_audit_entry(db, {
-                "case_id": case_id,
-                "bug_id": bug_id,
-                "source_id": source_id,
-                "engineer_id": engineer_id,
-                "step": "pipeline_complete",
-                "status": "done",
-                "summary": {
-                    "severity": synthesis.get("unified_severity"),
-                    "ai_severity": synthesis.get("unified_severity"),
-                    "confidence": synthesis.get("confidence"),
-                    "root_cause": synthesis.get("root_cause", "")[:500],
-                    "recommended_actions": synthesis.get("recommended_actions", [])[:3],
-                    "summary": synthesis.get("summary", "")[:500],
-                    "ticket_updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
-                    "ticket_severity": (context.get("primary_ticket") or {}).get("severity", ""),
-                    "ticket_status": (context.get("primary_ticket") or {}).get("status", ""),
-                    "updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
-                    "status": (context.get("primary_ticket") or {}).get("status", ""),
-                    "used_fallback": synthesis.get("used_fallback", False),
-                    "group_id": context.get("group_id"),
-                    "related_tickets": self._audit_related_tickets(
-                        context.get("related_tickets") or []),
-                },
-                "systems_queried": context.get("sources_queried", []),
-                "duration_ms": total_ms,
-            })
+            if not self._has_primary_ticket(context):
+                # No ticket was fetched: record the raw request source_id
+                # (never a resolved/guessed connector id) and flag the row
+                # as failed so History can distinguish it from real
+                # completions instead of treating it as a triaged bug.
+                await insert_audit_entry(db, {
+                    "case_id": case_id,
+                    "bug_id": bug_id,
+                    "source_id": source_id,
+                    "engineer_id": engineer_id,
+                    "step": "pipeline_complete",
+                    "status": "failed",
+                    "summary": {
+                        "triage_successful": False,
+                        "error": ("Ticket not found in source system — "
+                                  "retriage may have used wrong source"),
+                    },
+                    "systems_queried": context.get("sources_queried", []),
+                    "duration_ms": total_ms,
+                })
+            else:
+                await insert_audit_entry(db, {
+                    "case_id": case_id,
+                    "bug_id": bug_id,
+                    "source_id": source_id,
+                    "engineer_id": engineer_id,
+                    "step": "pipeline_complete",
+                    "status": "done",
+                    "summary": {
+                        "severity": synthesis.get("unified_severity"),
+                        "ai_severity": synthesis.get("unified_severity"),
+                        "confidence": synthesis.get("confidence"),
+                        "root_cause": synthesis.get("root_cause", "")[:500],
+                        "recommended_actions": synthesis.get("recommended_actions", [])[:3],
+                        "summary": synthesis.get("summary", "")[:500],
+                        "ticket_updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
+                        "ticket_severity": (context.get("primary_ticket") or {}).get("severity", ""),
+                        "ticket_status": (context.get("primary_ticket") or {}).get("status", ""),
+                        "updated_at": (context.get("primary_ticket") or {}).get("updated_at", ""),
+                        "status": (context.get("primary_ticket") or {}).get("status", ""),
+                        "used_fallback": synthesis.get("used_fallback", False),
+                        "group_id": context.get("group_id"),
+                        "related_tickets": self._audit_related_tickets(
+                            context.get("related_tickets") or []),
+                    },
+                    "systems_queried": context.get("sources_queried", []),
+                    "duration_ms": total_ms,
+                })
             await delete_pipeline_context(db, case_id)
 
         # Invalidate bug list cache after triage completes so

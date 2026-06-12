@@ -538,6 +538,8 @@ async def get_triage_history(
             "bug_id":          e.bug_id,
             "source_id":       e.source_id or "",
             "engineer_id":     e.engineer_id or "",
+            "status":          e.status or "",
+            "triage_successful": summary.get("triage_successful", True),
             "severity":        (
                 summary.get("severity")
                 or summary.get(
