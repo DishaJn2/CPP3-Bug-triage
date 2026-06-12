@@ -49,7 +49,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_KAFKA_GITHUB_TOKEN",
         "project_key": "apache/kafka",
         "ticket_prefix": "KGH",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-kafka-jira",
@@ -60,7 +60,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_KAFKA_JIRA_TOKEN",
         "project_key": "KAFKA",
         "ticket_prefix": "KAFKA",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "mozilla-firefox-bugzilla",
@@ -71,7 +71,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "MOZILLA_FIREFOX_BUGZILLA_TOKEN",
         "project_key": "Firefox",
         "ticket_prefix": "BUG",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-flink-github",
@@ -82,7 +82,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "apache/flink",
         "ticket_prefix": "FGH",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-hadoop-jira",
@@ -93,7 +93,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "HADOOP",
         "ticket_prefix": "HADOOP",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-hive-jira",
@@ -104,7 +104,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "HIVE",
         "ticket_prefix": "HIVE",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "kubernetes-github",
@@ -115,7 +115,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "kubernetes/kubernetes",
         "ticket_prefix": "K8S",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "vscode-github",
@@ -126,7 +126,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "microsoft/vscode",
         "ticket_prefix": "VGH",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-flink-jira",
@@ -137,7 +137,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "FLINK",
         "ticket_prefix": "FLINK",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id":       "hpe-confluence",
@@ -148,7 +148,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "CONFLUENCE_API_TOKEN",
         "project_key":     "HPEKB",
         "ticket_prefix":   "CONF",
-        "enabled":         True,
+        "enabled": False,
     },
     {
         "source_id": "hpe-customer-portal",
@@ -159,7 +159,7 @@ DEMO_SOURCES = [
         "auth_secret_ref": "",
         "project_key": "",
         "ticket_prefix": "CASE",
-        "enabled": True,
+        "enabled": False,
     },
 ]
 
@@ -268,7 +268,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "ZOOKEEPER",
         "ticket_prefix": "ZOOKEEPER",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-cassandra-jira",
@@ -278,7 +278,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "CASSANDRA",
         "ticket_prefix": "CASSANDRA",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "apache-beam-jira",
@@ -288,7 +288,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_JIRA_TOKEN",
         "project_key": "BEAM",
         "ticket_prefix": "BEAM",
-        "enabled": True,
+        "enabled": False,
     },
     
     # Jenkins JIRA — zero new code, same connector
@@ -300,7 +300,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "",
         "project_key": "JENKINS",
         "ticket_prefix": "JENKINS",
-        "enabled": True,
+        "enabled": False,
     },
     
     # Red Hat JIRA — zero new code
@@ -312,7 +312,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "",
         "project_key": "WFLY",
         "ticket_prefix": "WFLY",
-        "enabled": True,
+        "enabled": False,
     },
     
     # Linux Kernel Bugzilla — zero new code, same BugzillaConnector
@@ -324,7 +324,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "",
         "project_key": "Drivers",
         "ticket_prefix": "BUG",
-        "enabled": True,
+        "enabled": False,
     },
     
     # More GitHub repos — zero new code, same GithubConnector
@@ -336,7 +336,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "elastic/elasticsearch",
         "ticket_prefix": "ES",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "netty-github",
@@ -346,7 +346,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "netty/netty",
         "ticket_prefix": "NGH",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "grpc-java-github",
@@ -356,7 +356,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "grpc/grpc-java",
         "ticket_prefix": "GRPC",
-        "enabled": True,
+        "enabled": False,
     },
     {
         "source_id": "prometheus-github",
@@ -366,7 +366,7 @@ ADDITIONAL_SOURCES = [
         "auth_secret_ref": "APACHE_SPARK_GITHUB_TOKEN",
         "project_key": "prometheus/prometheus",
         "ticket_prefix": "PGH",
-        "enabled": True,
+        "enabled": False,
     },
 ]
 async def init():

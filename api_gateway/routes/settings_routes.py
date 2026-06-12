@@ -135,40 +135,6 @@ async def list_connections(user: User = Depends(get_current_user)):
     return await connection_service.list_connections()
 
 
-# ── ORIGINAL FAT ROUTE (kept until confirmed working) ─────────────
-# @router.get("/settings/connections")
-# async def list_connections(user: User = Depends(get_current_user)):
-#     async with AsyncSessionLocal() as db:
-#         sources = await get_all_sources(db)
-#     health_by_source = {}
-#     try:
-#         import asyncio
-#         health_results = await asyncio.wait_for(
-#             ConnectorRegistry.health_check_all(timeout=3.0),
-#             timeout=5.0,
-#         )
-#         health_by_source = {
-#             item.get("source_id"): item
-#             for item in health_results
-#             if item.get("source_id")
-#         }
-#     except Exception:
-#         health_by_source = {}
-#
-#     connections = [
-#         _format_source(s, health_by_source.get(s.source_id))
-#         for s in sources
-#     ]
-#     return {
-#         "connections": connections,
-#         "total": len(connections),
-#         "by_type": {
-#             st: len([s for s in sources if s.system_type == st])
-#             for st in SYSTEM_TYPE_LABELS
-#         },
-#     }
-
-
 @router.post("/settings/connections")
 async def add_connection(
     body: ConnectionCreate,
@@ -184,70 +150,6 @@ async def add_connection(
         project_key=body.project_key,
         ticket_prefix=body.ticket_prefix,
     )
-
-
-# ── ORIGINAL FAT ROUTE (kept until confirmed working) ─────────────
-# @router.post("/settings/connections")
-# async def add_connection(
-#     body: ConnectionCreate,
-#     user: User = Depends(get_current_user),
-# ):
-#     import re
-#
-#     source_id = re.sub(r"[^a-z0-9]+", "-", body.display_name.lower()).strip("-")
-#     source_id = f"{source_id}-{body.system_type}"
-#     env_var_name = re.sub(r"[^A-Z0-9]+", "_", body.display_name.upper()).strip("_") + "_TOKEN"
-#
-#     if body.auth_token:
-#         os.environ[env_var_name] = body.auth_token
-#
-#     if body.system_type not in SYSTEM_TYPE_TO_CLASS:
-#         raise HTTPException(status_code=400, detail=f"Unknown system_type: {body.system_type}")
-#
-#     cls = SYSTEM_TYPE_TO_CLASS[body.system_type]
-#     test_connector = cls(
-#         source_id=source_id,
-#         system_type=body.system_type,
-#         base_url=body.base_url,
-#         project_key=body.project_key or "",
-#         ticket_prefix=body.ticket_prefix or "",
-#         token=body.auth_token or "",
-#     )
-#     try:
-#         import asyncio
-#         health = await asyncio.wait_for(
-#             test_connector.health_check(),
-#             timeout=10.0,
-#         )
-#         if not health.get("ok"):
-#             raise RuntimeError(health.get("error") or "health check failed")
-#         test_message = "Connection successful"
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=400,
-#             detail=f"Connection test failed: {str(e)[:200]}. Nothing was saved.",
-#         )
-#
-#     async with AsyncSessionLocal() as db:
-#         existing = await get_source_by_id(db, source_id)
-#         if existing:
-#             raise HTTPException(status_code=409, detail=f"Connection '{source_id}' already exists")
-#         new_source = await create_source(db, {
-#             "source_id":       source_id,
-#             "display_name":    body.display_name,
-#             "system_type":     body.system_type,
-#             "base_url":        body.base_url,
-#             "port":            body.port,
-#             "auth_type":       body.auth_type or "bearer_token",
-#             "auth_secret_ref": env_var_name,
-#             "project_key":     body.project_key or "",
-#             "ticket_prefix":   body.ticket_prefix or "",
-#             "enabled":         True,
-#         })
-#         result = _format_source(new_source)
-#
-#     ConnectorRegistry.invalidate_cache()
-#     return {"connection": result, "test_message": test_message, "status": "created"}
 
 
 @router.put("/settings/connections/{source_id}")
@@ -367,51 +269,3 @@ async def test_connection(
     return await connection_service.test_connection(source_id)
 
 
-# ── ORIGINAL FAT ROUTE (kept until confirmed working) ─────────────
-# @router.post("/settings/connections/{source_id}/test")
-# async def test_connection(
-#     source_id: str,
-#     user: User = Depends(get_current_user),
-# ):
-#     async with AsyncSessionLocal() as db:
-#         source = await get_source_by_id(db, source_id)
-#         if not source:
-#             raise HTTPException(status_code=404, detail="Connection not found")
-#
-#     cls = SYSTEM_TYPE_TO_CLASS.get(source.system_type)
-#     if not cls:
-#         raise HTTPException(status_code=400, detail=f"No connector for type: {source.system_type}")
-#
-#     token = os.environ.get(source.auth_secret_ref or "", "")
-#     connector = cls(
-#         source_id=source.source_id,
-#         system_type=source.system_type,
-#         base_url=source.base_url,
-#         project_key=source.project_key or "",
-#         ticket_prefix=source.ticket_prefix or "",
-#         token=token,
-#     )
-#
-#     try:
-#         import asyncio
-#         health = await asyncio.wait_for(connector.health_check(), timeout=10.0)
-#         if not health.get("ok"):
-#             raise RuntimeError(health.get("error") or "health check failed")
-#         return {
-#             "status": "ok",
-#             "source_id": source_id,
-#             "message": "Connected",
-#             "token_present": bool(token),
-#             "health_status": "Connected",
-#             "latency_ms": health.get("latency_ms", 0),
-#         }
-#     except Exception as e:
-#         message = str(e)[:300]
-#         health_status = "Timeout" if "timeout" in message.lower() else "Error"
-#         return {
-#             "status": "error",
-#             "source_id": source_id,
-#             "message": message,
-#             "token_present": bool(token),
-#             "health_status": health_status,
-#         }
