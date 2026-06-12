@@ -23,7 +23,6 @@ Agentic bug triage system with multi-source connectors and AI pipeline.
 3. Install and initialize:
    pip install -r requirements.txt
    python -m scripts.init_db
-   python scripts/seed_kb_articles.py
 
 4. Run backend:
    uvicorn api_gateway.main:app --reload --host 0.0.0.0 --port 8000
