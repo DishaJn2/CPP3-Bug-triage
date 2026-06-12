@@ -315,7 +315,7 @@ function GroupTreeRow({ group, onTriage, triaging, navigate, onRetriage }) {
               <span style={{ fontSize: 11, color: 'var(--orange)', fontWeight: 600, padding: '4px 8px', background: 'var(--orange-lt)', borderRadius: 4 }}>Triage expired</span>
               <button
                 className="btn btn-outline btn-sm"
-                onClick={(e) => { e.stopPropagation(); onRetriage(root.ticket_id); }}
+                onClick={(e) => { e.stopPropagation(); onRetriage(root); }}
                 disabled={triaging === root.ticket_id}
               >
                 {triaging === root.ticket_id ? '…' : 'Re-triage'}
@@ -391,6 +391,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
   const [statusLoading, setStatusLoading] = useState(false)
   const [statusError, setStatusError] = useState(false)
   const triage = bug.triage_info || {}
+  const children = bug.children || []
   const confPct = triage.confidence != null ? toPercent(triage.confidence) : null
   const triagedAt = fmtDate(triage.triaged_at)
   const caseIdShort = triage.id ? `BT-${String(triage.id).padStart(3, '0')}` : triage.case_id ? `BT-${triage.case_id.slice(0, 6).toUpperCase()}` : 'BT-?'
@@ -462,7 +463,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
             <span style={{ fontSize: 11, color: 'var(--orange)', fontWeight: 600, padding: '4px 8px', background: 'var(--orange-lt)', borderRadius: 4 }}>Triage expired</span>
             <button
               className="btn btn-outline btn-sm"
-              onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id); }}
+              onClick={(e) => { e.stopPropagation(); onRetriage(bug); }}
               disabled={retriaging === bug.ticket_id}
             >
               {retriaging === bug.ticket_id ? '…' : 'Re-triage'}
@@ -498,7 +499,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                 <button
                   className="btn btn-teal btn-sm"
-                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug) }}
                   disabled={retriaging === bug.ticket_id}
                 >
                   {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
@@ -532,7 +533,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                 <button
                   className="btn btn-teal btn-sm"
-                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug) }}
                   disabled={retriaging === bug.ticket_id}
                 >
                   {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
@@ -546,7 +547,7 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                 <button
                   className="btn btn-outline btn-sm"
-                  onClick={(e) => { e.stopPropagation(); onRetriage(bug.ticket_id) }}
+                  onClick={(e) => { e.stopPropagation(); onRetriage(bug) }}
                   disabled={retriaging === bug.ticket_id}
                 >
                   {retriaging === bug.ticket_id ? '…' : 'Run Fresh Triage'}
@@ -581,6 +582,27 @@ function TriagedBugRow({ bug, onRetriage, retriaging, navigate }) {
                 )}
               </div>
             )}
+            
+            {children.length > 0 && children.map((child, idx) => {
+              const childSource = getSourceType(child)
+              const childUrl = child.url || ''
+              return (
+                <div key={`child-${child.ticket_id || idx}`} className="tree-child" style={{ marginTop: 6, marginLeft: -24 }}>
+                  <span className="tree-connector">├─</span>
+                  <span className="match-badge match-l">Related</span>
+                  <SrcBadge type={childSource} />
+                  {childUrl ? (
+                    <a className="raw-id" href={childUrl} target="_blank" rel="noopener noreferrer">{child.ticket_id}</a>
+                  ) : (
+                    <span className="raw-id">{child.ticket_id}</span>
+                  )}
+                  <span className="child-title">{child.title || 'Related issue'}</span>
+                  <SevBadge sev={child.severity} />
+                  <span className="bug-status-pill">{child.status || 'open'}</span>
+                  {childUrl && <a className="ext-btn" href={childUrl} target="_blank" rel="noopener noreferrer">↗</a>}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

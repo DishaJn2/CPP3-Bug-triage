@@ -62,10 +62,10 @@ export default function HistoryPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const handleRetriage = async (bugId) => {
+  const handleRetriage = async (bugId, sourceId) => {
     setRetriagingId(bugId)
     try {
-      const data = await startTriage(bugId)
+      const data = await startTriage(bugId, sourceId)
       navigate(`/triage/${data.case_id}`)
     } catch (e) {
       alert('Failed to start triage: ' + (e.response?.data?.detail || e.message))
@@ -182,7 +182,7 @@ export default function HistoryPage() {
                         )}
                         <button
                           className="btn btn-ghost btn-sm"
-                          onClick={() => handleRetriage(entry.bug_id)}
+                          onClick={() => handleRetriage(entry.bug_id, entry.source_id)}
                           disabled={retriagingId === entry.bug_id}
                         >
                           {retriagingId === entry.bug_id ? '…' : 'Re-triage'}
