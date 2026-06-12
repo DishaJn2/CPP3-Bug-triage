@@ -1,4 +1,3 @@
-"""Initialize the database and seed all data sources, CMDB, SLA config, users, and customer cases."""
 import asyncio
 import sys
 import os
@@ -12,7 +11,7 @@ load_dotenv()
 from orchestrator.db.base import Base
 from orchestrator.db.session import engine, AsyncSessionLocal, ensure_runtime_schema
 from orchestrator.db.models import (
-    Base, SourceRegistry, CMDBTeamRegistry, SLAConfig, UserRole, CustomerCase,
+    Base, SourceRegistry, UserRole,
     SystemGroupRegistry, BugGroupMapping
 )
 from sqlalchemy import select
@@ -163,101 +162,12 @@ DEMO_SOURCES = [
     },
 ]
 
-DEMO_CMDB = [
-    {"component_name": "SQL",          "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
-    {"component_name": "Core",         "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
-    {"component_name": "MLlib",        "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
-    {"component_name": "Streaming",    "team_name": "Apache Spark",   "source_id": "apache-spark-jira"},
-    {"component_name": "PySpark",      "team_name": "Apache Spark",   "source_id": "apache-spark-github"},
-    {"component_name": "Network",      "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
-    {"component_name": "Replication",  "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
-    {"component_name": "Streams",      "team_name": "Apache Kafka",   "source_id": "apache-kafka-jira"},
-    {"component_name": "DOM",          "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
-    {"component_name": "JavaScript Engine", "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
-    {"component_name": "Graphics",     "team_name": "Mozilla Firefox", "source_id": "mozilla-firefox-bugzilla"},
-    {"component_name": "YARN",         "team_name": "Hadoop YARN",    "source_id": "apache-hadoop-jira", "escalation_contact": "dev@hadoop.apache.org"},
-    {"component_name": "Runtime",      "team_name": "Flink Runtime",  "source_id": "apache-flink-jira", "escalation_contact": "dev@flink.apache.org"},
-    {"component_name": "Scheduler",    "team_name": "Kubernetes SIG", "source_id": "kubernetes-github", "escalation_contact": "sig-scheduling@kubernetes.io"},
-]
-
-DEMO_SLA = [
-    {
-        "tier_name": "standard",
-        "p0_resolution_hours": 96,
-        "p1_resolution_hours": 168,
-        "p2_resolution_hours": 336,
-        "p3_resolution_hours": 720,
-        "at_risk_threshold_pct": 20,
-    },
-    {
-        "tier_name": "premium",
-        "p0_resolution_hours": 48,
-        "p1_resolution_hours": 96,
-        "p2_resolution_hours": 168,
-        "p3_resolution_hours": 336,
-        "at_risk_threshold_pct": 15,
-    },
-]
-
 DEMO_USERS = [
     {"email": "disha@hpe.com",     "password": "password123", "role": "engineer",  "display_name": "Disha Jain"},
     {"email": "admin@hpe.com",     "password": "admin123",    "role": "admin",     "display_name": "Admin User"},
     {"email": "customer@acme.com", "password": "customer123", "role": "customer",  "display_name": "Acme Customer"},
     {"email": "exec@hpe.com",      "password": "exec123",     "role": "executive", "display_name": "HPE Executive"},
 ]
-MOCK_CUSTOMER_CASES = [
-    {
-        "case_id": "CASE-10041",
-        "customer": "Acme Corporation",
-        "severity": "Critical",
-        "title": "CTE query optimizer crash blocking production ETL pipeline",
-        "related_bug_keywords": ["NormalizeCTEIds", "InlineCTE", "CTE", "optimizer"],
-        "impact": "Production ETL pipeline down. 3 data engineers blocked. Revenue reporting delayed.",
-        "opened_at": datetime(2026, 5, 28, 9, 0, 0, tzinfo=timezone.utc),
-        "status": "Open",
-    },
-    {
-        "case_id": "CASE-10038",
-        "customer": "GlobalTech Industries",
-        "severity": "High",
-        "title": "PySpark DataFrame type annotation failures in CI pipeline",
-        "related_bug_keywords": ["is_remote_only", "DataFrame", "typechecking", "Union"],
-        "impact": "CI/CD blocked for 2 teams. 15 engineers unable to merge PRs.",
-        "opened_at": datetime(2026, 5, 27, 14, 0, 0, tzinfo=timezone.utc),
-        "status": "Open",
-    },
-    {
-        "case_id": "CASE-10035",
-        "customer": "DataStream Analytics",
-        "severity": "High",
-        "title": "Structured streaming metadata columns not accessible from DSv2 source",
-        "related_bug_keywords": ["SupportsMetadataColumns", "DSv2", "streaming", "metadata"],
-        "impact": "Real-time analytics dashboard missing metadata. Customer SLA at risk.",
-        "opened_at": datetime(2026, 5, 26, 11, 0, 0, tzinfo=timezone.utc),
-        "status": "Open",
-    },
-    {
-        "case_id": "CASE-10029",
-        "customer": "FinTech Solutions",
-        "severity": "Medium",
-        "title": "Kafka consumer group rebalancing causing processing delays",
-        "related_bug_keywords": ["consumer", "rebalance", "kafka", "session"],
-        "impact": "Payment processing latency increased 3x during rebalance events.",
-        "opened_at": datetime(2026, 5, 24, 8, 0, 0, tzinfo=timezone.utc),
-        "status": "Open",
-    },
-    {
-        "case_id": "CASE-10021",
-        "customer": "CloudBase Corp",
-        "severity": "Medium",
-        "title": "Firefox WebGL context lost on GPU-intensive dashboards",
-        "related_bug_keywords": ["WebGL", "context", "GPU", "firefox", "graphics"],
-        "impact": "Analytics dashboards crash on Firefox. 200 users affected.",
-        "opened_at": datetime(2026, 5, 22, 16, 0, 0, tzinfo=timezone.utc),
-        "status": "In Progress",
-    },
-]
-
 ADDITIONAL_SOURCES = [
     # More Apache JIRA projects — zero new code
     {
@@ -389,33 +299,9 @@ async def init():
                 print(f"  ~ {src_data['source_id']} (already exists)")
         await db.commit()
 
-        print("\nSeeding CMDB entries...")
-        for cmdb_data in DEMO_CMDB:
-            existing = await db.execute(
-                select(CMDBTeamRegistry).where(CMDBTeamRegistry.component_name == cmdb_data["component_name"])
-            )
-            if existing.scalar_one_or_none() is None:
-                db.add(CMDBTeamRegistry(**cmdb_data))
-                print(f"  + {cmdb_data['component_name']} -> {cmdb_data['team_name']}")
-            else:
-                print(f"  ~ {cmdb_data['component_name']} (already exists)")
-        await db.commit()
-
-        print("\nSeeding SLA configs...")
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-        for sla_data in DEMO_SLA:
-            stmt = pg_insert(SLAConfig).values(**sla_data)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["tier_name"],
-                set_={k: v for k, v in sla_data.items() if k != "tier_name"},
-            )
-            await db.execute(stmt)
-            print(f"  + {sla_data['tier_name']}")
-        await db.commit()
-
         print("\nSeeding demo users...")
         from passlib.context import CryptContext
-        pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
         user_count_result = await db.execute(select(UserRole))
         existing_users = list(user_count_result.scalars().all())
         if not existing_users:
@@ -431,18 +317,6 @@ async def init():
             await db.commit()
         else:
             print(f"  ~ {len(existing_users)} users already exist, skipping seed")
-
-        print("\nSeeding customer cases...")
-        for case_data in MOCK_CUSTOMER_CASES:
-            existing = await db.execute(
-                select(CustomerCase).where(CustomerCase.case_id == case_data["case_id"])
-            )
-            if existing.scalar_one_or_none() is None:
-                db.add(CustomerCase(**case_data))
-                print(f"  + {case_data['case_id']} — {case_data['customer']}")
-            else:
-                print(f"  ~ {case_data['case_id']} (already exists)")
-        await db.commit()
 
     print("\nDatabase initialization complete.")
 
